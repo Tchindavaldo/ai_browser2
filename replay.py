@@ -452,12 +452,24 @@ async def main():
 
                     inner = ping_data.get("data", {})
                     if isinstance(inner, dict):
-                        nested2 = inner.get("data", {})
-                        if isinstance(nested2, dict):
-                            flw_ref = nested2.get("flw_reference", "") or nested2.get("flwRef", "")
-                            if flw_ref:
-                                print(f"    Got flw_ref: {flw_ref}")
-                                break
+                        # The real charge result lives in data.response — a JSON
+                        # *string* (or already-parsed in data.response_parsed).
+                        resp_obj = inner.get("response_parsed")
+                        if not isinstance(resp_obj, dict):
+                            resp_str = inner.get("response", "")
+                            if isinstance(resp_str, str) and resp_str.startswith("{"):
+                                try:
+                                    resp_obj = json.loads(resp_str)
+                                except json.JSONDecodeError:
+                                    resp_obj = {}
+                        if isinstance(resp_obj, dict):
+                            nested2 = resp_obj.get("data", {})
+                            if isinstance(nested2, dict):
+                                flw_ref = nested2.get("flw_reference", "") or nested2.get("flwRef", "")
+                                if flw_ref:
+                                    print(f"    Got flw_ref: {flw_ref}")
+                                    print(f"    note: {nested2.get('note', '')}")
+                                    break
                     status = ping_data.get("status", "")
                     if status == "error":
                         print(f"    Charge failed: {ping_data.get('message', '')}")
