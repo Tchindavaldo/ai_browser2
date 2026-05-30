@@ -108,8 +108,9 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
         if st == "failed":
             return "failed", ("Paiement échoué après le USSD "
                               "(refus de l'utilisateur ou solde insuffisant).")
-        # pending → continue polling
-        return None
+        # pending (code 02) → the USSD was sent. The final verdict can still
+        # arrive via data.status (e.g. status=failed while code stays 02), so
+        # don't stop at the code — fall through to the status check below.
 
     # Check data.status
     if status in FLW_STATUSES:
@@ -330,14 +331,24 @@ async def step3_charge(
             json=charge_body,
             headers=HEADERS,
         )
-        result = resp.json()
+        try:
+            result = resp.json()
+        except json.JSONDecodeError:
+            # Flutterwave can return an empty/non-JSON body on a 502/504 or a
+            # transient gateway hiccup — don't crash, surface it as an error.
+            print(f"    charge status: {resp.status_code} (non-JSON body, {len(resp.content)} bytes)")
+            print(f"    raw response: {resp.text[:300]!r}")
+            return {"modalauditid": modalauditid, "charge_response": {
+                "status": "error",
+                "message": f"Réponse Flutterwave invalide (HTTP {resp.status_code}, corps vide). Réessayez.",
+            }}
         print(f"    charge status: {resp.status_code}")
         print(f"    response: {json.dumps(result, indent=2)[:500]}")
         return {"modalauditid": modalauditid, "charge_response": result}
 
 
 async def step4_poll_verify(
-    modalauditid: str, flw_ref: str, timeout_s: int = 60
+    modalauditid: str, flw_ref: str, timeout_s: int = 1800
 ) -> dict:
     """Poll the verify endpoint until payment is confirmed or failed."""
     print(f"[4] Polling verify (flw_ref={flw_ref})...")
@@ -345,16 +356,22 @@ async def step4_poll_verify(
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(timeout_s // 3):
             await asyncio.sleep(3)
-            resp = await client.post(
-                FLW_VERIFY_URL,
-                json={
-                    "modalauditid": modalauditid,
-                    "PBFPubKey": FLW_PUB_KEY,
-                    "flw_ref": flw_ref,
-                },
-                headers=HEADERS,
-            )
-            data = resp.json()
+            # A single network hiccup (ReadTimeout, connection reset, non-JSON
+            # body) must NOT abort a 30-min poll — just skip this tick and retry.
+            try:
+                resp = await client.post(
+                    FLW_VERIFY_URL,
+                    json={
+                        "modalauditid": modalauditid,
+                        "PBFPubKey": FLW_PUB_KEY,
+                        "flw_ref": flw_ref,
+                    },
+                    headers=HEADERS,
+                )
+                data = resp.json()
+            except (httpx.HTTPError, json.JSONDecodeError) as e:
+                print(f"    poll {i+1}: réseau instable ({type(e).__name__}), on réessaie...")
+                continue
             status = data.get("data", {}).get("status", "pending")
             charge_code = data.get("data", {}).get("chargeResponseCode", "")
             print(f"    poll {i+1}: status={status} code={charge_code}")
