@@ -2,10 +2,10 @@
 
 import json
 import logging
-from dataclasses import dataclass
 
 import httpx
 
+from core.base import PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.llm_client import LlmClient
 from core.reasoning_loop import ReasoningLoop
@@ -21,53 +21,6 @@ DIGIKUNTZ_BASE = _dk.base
 DIGIKUNTZ_USER_ID = _dk.user_id
 DIGIKUNTZ_SECRET = _dk.secret
 DEFAULT_CALLBACK = _dk.callback_url
-
-
-@dataclass
-class PaymentRequest:
-    amount: int  # XAF
-    phone: str
-    network: str  # MTN or Orange
-    email: str
-    sender_name: str = "Rauvalia"
-    callback_url: str = DEFAULT_CALLBACK
-
-
-@dataclass
-class PaymentResult:
-    success: bool = False
-    error: str = ""
-    transaction_id: str = ""
-    payment_status: str = ""
-    turns: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    # The real prize: captured Flutterwave charge request
-    flutterwave_charge_url: str = ""
-    flutterwave_charge_body: str = ""
-    flutterwave_charge_response: str = ""
-    curl_replay: str = ""
-    # Plaintext data BEFORE encryption (the real gold)
-    plaintext_payload: str = ""
-    public_key: str = ""
-    # Verify endpoint for curl replay polling
-    verify_url: str = ""
-    verify_request_body: str = ""
-    verify_last_response: str = ""
-    verify_curl: str = ""
-    # USSD validation result after waiting
-    final_status: str = ""
-    final_message: str = ""
-    # Console + network error signals captured around the Pay click
-    error_signals: dict = None
-    # All captured network requests summary
-    captured_requests: list[dict] = None
-
-    def __post_init__(self):
-        if self.captured_requests is None:
-            self.captured_requests = []
-        if self.error_signals is None:
-            self.error_signals = {}
 
 
 class DigikuntzAgent:
@@ -450,7 +403,7 @@ class DigikuntzAgent:
                     "userPhone": req.phone.replace("+237", ""),
                     "userCountry": "CM",
                     "senderName": req.sender_name,
-                    "callbackUrl": req.callback_url,
+                    "callbackUrl": req.callback_url or DEFAULT_CALLBACK,
                 },
                 headers={
                     "x-user-id": DIGIKUNTZ_USER_ID,
