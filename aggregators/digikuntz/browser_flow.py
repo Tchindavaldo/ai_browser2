@@ -221,12 +221,12 @@ class DigikuntzAgent:
                   ussd_sent: bool = False) -> str:
         """Produce a clear user-facing message.
 
-        The SAME 'failed' status means different things depending on whether
-        the USSD prompt was already sent:
-          - failure BEFORE any USSD (at /charge)  -> operator/network problem
-            -> name the network and suggest the alternative.
-          - failure AFTER the USSD was sent        -> the user refused or had
-            insufficient funds -> do NOT blame the network.
+        The SAME 'failed' status means different things:
+          - insufficient funds (code 51 / "solde insuffisant" / "Insufficient
+            Fund") -> tell the user to top up, whether or not USSD was sent.
+          - other failure AFTER the USSD was sent -> refusal by the user.
+          - other failure BEFORE any USSD (at /charge) -> operator/network
+            problem -> name the network and suggest the alternative.
         """
         if status == "successful":
             return "Paiement reussi."
@@ -235,6 +235,14 @@ class DigikuntzAgent:
         if status == "network_down":
             return classifier.network_failure_message(network)
         if status == "failed":
+            low = (raw or "").lower()
+            # Insufficient funds is a balance issue, never a network problem.
+            if ("insufficient" in low or "solde insuffisant" in low
+                    or "insufficient fund" in low or '"51"' in low
+                    or "chargeresponsecode\":\"51" in low):
+                return ("Solde insuffisant sur le compte "
+                        f"{classifier.network_label(network)}. "
+                        "Veuillez recharger puis reessayer.")
             if ussd_sent:
                 return ("Paiement echoue apres le USSD (refus de l'utilisateur "
                         "ou solde insuffisant). Veuillez reessayer.")
