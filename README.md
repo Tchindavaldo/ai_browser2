@@ -52,9 +52,12 @@ pip install -r requirements.txt
 playwright install chromium          # navigateur pour le mode browser
 cp .env.example .env                 # puis remplir les valeurs
 
-python main.py                       # démarre l'API (+ navigateur au boot)
-RELOAD=1 python main.py              # dev : hot-reload sur changement de .py
+./start.sh                           # démarre l'API (+ navigateur au boot)
+./dev.sh                             # dev : hot-reload sur changement de .py
 ```
+
+> Les scripts utilisent le venv automatiquement. Équivalents longs :
+> `venv/bin/python main.py` et `RELOAD=1 venv/bin/python main.py`.
 
 > Le hot-reload (`RELOAD=1`) surveille le **code** (`.py`), pas le `.env`. Après avoir
 > modifié `.env` (ex: ajout Supabase), il faut **couper et relancer** le serveur.
