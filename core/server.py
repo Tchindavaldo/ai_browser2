@@ -152,8 +152,13 @@ async def health():
 
 @app.get("/aggregators", tags=["system"], summary="Agrégateurs disponibles")
 async def list_aggregators():
-    """Liste les agrégateurs (modules) enregistrés dans le registre."""
-    return {"aggregators": registry.names()}
+    """Liste les agrégateurs et, pour chacun, les réseaux exacts acceptés."""
+    return {
+        "aggregators": [
+            {"name": name, "supported_networks": registry.get(name).supported_networks}
+            for name in registry.names()
+        ]
+    }
 
 
 @app.post(
@@ -164,6 +169,7 @@ async def list_aggregators():
     responses={
         404: {"description": "Agrégateur inconnu."},
         400: {"description": "Mode invalide."},
+        422: {"description": "Réseau non supporté (renvoie la liste exacte attendue)."},
         409: {"description": "Mode replay sans template (lancer mode=browser d'abord)."},
         502: {"description": "Replay échoué et fallback navigateur désactivé."},
     },
@@ -186,10 +192,25 @@ async def pay(req: PayRequest):
         raise HTTPException(400, f"Unknown mode '{req.mode}' (use 'auto', 'browser' or 'replay')")
 
     agg = cls(browser=browser, llm=llm, db=db)
+
+    # Validate the network against this aggregator's supported list. On failure,
+    # echo back the exact accepted values (422).
+    canonical_network = agg.normalize_network(req.network)
+    if canonical_network is None:
+        raise HTTPException(
+            422,
+            {
+                "error": "invalid_network",
+                "message": f"Réseau '{req.network}' non supporté par l'agrégateur '{req.aggregator}'.",
+                "aggregator": req.aggregator,
+                "supported_networks": agg.supported_networks,
+            },
+        )
+
     payment = PaymentRequest(
         amount=req.amount,
         phone=req.phone,
-        network=req.network,
+        network=canonical_network,
         email=req.email,
         sender_name=req.sender_name,
         callback_url=req.callback_url,

@@ -88,11 +88,32 @@ class Aggregator(ABC):
 
     name: str = "base"
 
+    # Canonical networks this aggregator accepts (the exact values the backend
+    # expects). Each aggregator overrides this. Validation in /pay rejects
+    # anything else and echoes this list back.
+    supported_networks: list[str] = []
+
     def __init__(self, browser: "BrowserController", llm: "LlmClient", db=None, config=None):
         self.browser = browser
         self.llm = llm
         self.db = db
         self.config = config
+
+    def normalize_network(self, network: str) -> str | None:
+        """Return the canonical network value for `network`, or None if invalid.
+
+        Matches case-insensitively against supported_networks and common
+        substrings (e.g. 'orange' -> 'Orangemoney') so callers can be lenient,
+        while the canonical value is what gets sent downstream.
+        """
+        if not network:
+            return None
+        n = network.strip().lower()
+        for canonical in self.supported_networks:
+            c = canonical.lower()
+            if n == c or n in c or c.split()[0] in n:
+                return canonical
+        return None
 
     # --- transaction creation (from _create_transaction / replay step1) ---
     @abstractmethod

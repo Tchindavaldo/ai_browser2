@@ -105,8 +105,18 @@ FastAPI génère automatiquement la doc OpenAPI :
 - `browser` — flux IA complet ; **déduit et persiste** le template curl.
 - `replay` — rejoue via le template stocké. **409** si aucun template (lancer `browser` d'abord).
 
-**Codes d'erreur :** `404` agrégateur inconnu · `400` mode invalide · `409` replay sans
-template · `502` replay échoué et fallback désactivé.
+**Codes d'erreur :** `404` agrégateur inconnu · `400` mode invalide · `422` réseau non
+supporté (renvoie la liste exacte attendue) · `409` replay sans template · `502` replay
+échoué et fallback désactivé.
+
+**Réseaux supportés** : propres à chaque agrégateur. `GET /aggregators` les expose :
+
+```json
+{"aggregators":[{"name":"digikuntz","supported_networks":["Orangemoney","MTN"]}]}
+```
+
+Un `network` invalide renvoie `422` avec la liste exacte ; les variantes tolérées
+(`orange` → `Orangemoney`) sont normalisées automatiquement.
 
 Exemple :
 

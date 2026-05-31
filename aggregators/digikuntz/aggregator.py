@@ -56,6 +56,8 @@ def _apply_template(template: "CurlTemplate | None"):
 
 class DigikuntzAggregator(Aggregator):
     name = "digikuntz"
+    # Canonical network values expected by DigiKUNTZ/Flutterwave.
+    supported_networks = ["Orangemoney", "MTN"]
 
     @property
     def _agent(self) -> "browser_flow.DigikuntzAgent":
