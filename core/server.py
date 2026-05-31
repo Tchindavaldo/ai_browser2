@@ -187,9 +187,23 @@ async def pay(req: PayRequest):
 
     cls = registry.get(req.aggregator)
     if cls is None:
-        raise HTTPException(404, f"Unknown aggregator '{req.aggregator}'. Available: {registry.names()}")
+        raise HTTPException(
+            404,
+            {
+                "error": "unknown_aggregator",
+                "message": f"Agrégateur '{req.aggregator}' inconnu.",
+                "supported_aggregators": registry.names(),
+            },
+        )
     if req.mode not in ("auto", "browser", "replay"):
-        raise HTTPException(400, f"Unknown mode '{req.mode}' (use 'auto', 'browser' or 'replay')")
+        raise HTTPException(
+            400,
+            {
+                "error": "invalid_mode",
+                "message": f"Mode '{req.mode}' invalide.",
+                "supported_modes": ["auto", "browser", "replay"],
+            },
+        )
 
     agg = cls(browser=browser, llm=llm, db=db)
 
