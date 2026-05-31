@@ -105,6 +105,14 @@ class Aggregator(ABC):
         """The natural-language objective handed to the reasoning loop."""
 
     @abstractmethod
+    async def decide_browser_outcome(self, req: PaymentRequest, loop_result, result: PaymentResult) -> None:
+        """Decide the final outcome after the reasoning loop (in place on result).
+
+        Provider-specific (e.g. DigiKUNTZ's USSD watch loop + classifier/LLM
+        verdict); the generic runner delegates the verdict here.
+        """
+
+    @abstractmethod
     def network_label(self, network: str) -> str:
         """Human-facing network name (e.g. 'Orange Money')."""
 
@@ -115,6 +123,10 @@ class Aggregator(ABC):
     @abstractmethod
     def verify_request_matcher(self, r: "CapturedRequest") -> bool:
         """Predicate selecting verify/polling requests among captured requests."""
+
+    @abstractmethod
+    def checkout_url_predicate(self, url: str) -> bool:
+        """True while the URL is still on the provider's checkout (not redirected)."""
 
     # --- template extraction (browser mode -> DB) ---
     @abstractmethod

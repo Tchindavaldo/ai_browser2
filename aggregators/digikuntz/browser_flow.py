@@ -8,7 +8,6 @@ import httpx
 from core.base import PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.llm_client import LlmClient
-from core.reasoning_loop import ReasoningLoop
 from core import classifier
 
 log = logging.getLogger("ai_browser2")
@@ -30,56 +29,9 @@ class DigikuntzAgent:
         self.browser = browser
         self.llm = llm
 
-    async def pay(self, req: PaymentRequest) -> PaymentResult:
-        result = PaymentResult()
-
-        # 1. Create transaction via digiKUNTZ API
-        log.info(
-            "Creating digiKUNTZ transaction: %d XAF, %s, %s",
-            req.amount, req.network, req.phone,
-        )
-        try:
-            tx = await self._create_transaction(req)
-        except Exception as e:
-            result.error = f"digikuntz API error: {e}"
-            log.error(result.error)
-            return result
-
-        result.transaction_id = tx.get("transactionRef", "")
-        payment_link = tx.get("paymentLink", "")
-
-        if not payment_link:
-            result.error = f"No paymentLink in response: {tx}"
-            log.error(result.error)
-            return result
-
-        log.info("Transaction created: ref=%s link=%s", result.transaction_id, payment_link)
-
-        # 2. Start network capture BEFORE navigating
-        self.browser.start_capture()
-
-        # 3. Navigate to payment link and enter the Flutterwave iframe.
-        #    FAST + non-blocking: we just enter the iframe (don't block waiting
-        #    for the form). If only a loader is showing, the AGENT handles it
-        #    itself from turn 1 (wait / reload), instead of us blocking ~100s.
-        await self.browser.goto(payment_link)
-        await self.browser.wait(ms=3000)
-        try:
-            await self.browser.enter_iframe("iframe")
-            # Best-effort: hook crypto + short wait for the form, but DON'T block.
-            try:
-                frame = getattr(self.browser, '_active_frame', self.browser.page)
-                await frame.wait_for_selector("#phone", timeout=6000)
-            except Exception:
-                pass  # form not ready yet — the agent will recover
-            await self.browser.hook_crypto()
-            log.info("Entered iframe (agent will handle loader if form not ready)")
-        except Exception as e:
-            log.warning("Could not enter iframe yet (%s) — agent will retry", e)
-            self.browser._active_frame = self.browser.page
-
-        # 4. Let the AI agent drive Flutterwave checkout autonomously
-        objective = (
+    def browser_objective(self, req: PaymentRequest) -> str:
+        """The detailed FR objective handed to the reasoning loop."""
+        return (
             f"Tu es sur la page de paiement Flutterwave dans un iframe. "
             f"Ton objectif: remplir le formulaire mobile money et payer. "
             f"ETAPES dans cet ordre:\n"
@@ -126,24 +78,13 @@ class DigikuntzAgent:
             f"\"message\": \"ce qui est affiche a l'ecran\"}}"
         )
 
-        # Clear console/network diagnostic buffers right before the agent acts
-        # so any error signals belong to the Pay action.
-        self.browser.reset_diagnostics()
+    async def decide_browser_outcome(self, req, loop_result, result) -> None:
+        """DigiKUNTZ-specific outcome decision after the reasoning loop.
 
-        loop = ReasoningLoop(self.browser, self.llm, max_turns=22)
-        loop_result = await loop.run(objective)
-
-        # 5. Capture plaintext payload from crypto hook
-        plaintexts = await self.browser.get_captured_plaintexts()
-        if plaintexts:
-            last = plaintexts[-1]
-            result.plaintext_payload = last.get("plaintext", "")
-            result.public_key = last.get("publicKey", "")
-            log.info("Captured plaintext payload: %s", result.plaintext_payload[:500])
-            log.info("Public key: %s", result.public_key[:100])
-        else:
-            log.warning("No plaintext captured from crypto hook")
-
+        Operates in place on `result` (sets final_status/final_message/
+        payment_status/error_signals). Keeps the USSD watch loop + classifier/LLM
+        verdict semantics here, as the generic runner stays provider-agnostic.
+        """
         # 6. Parse agent immediate result
         agent_status = "unknown"
         agent_message = ""
@@ -272,50 +213,9 @@ class DigikuntzAgent:
                 result.final_status = status or agent_status or "unknown"
                 result.final_message = msg
 
-        # 8. Stop capture and extract Flutterwave charge request
-        captured = self.browser.stop_capture()
-
-        result.turns = loop_result.turns
-        result.input_tokens = loop_result.total_input_tokens
-        result.output_tokens = loop_result.total_output_tokens
+        # Final status is decided; the generic runner captures charge/verify and
+        # sets success/captured_requests.
         result.payment_status = result.final_status
-
-        # Summarize all captured requests
-        result.captured_requests = [
-            {"method": r.method, "url": r.url[:200], "status": r.status}
-            for r in captured
-        ]
-
-        # Find the Flutterwave charge request
-        charge = self.browser.get_flutterwave_charge()
-        if charge:
-            result.flutterwave_charge_url = charge.url
-            result.flutterwave_charge_body = charge.request_body
-            result.flutterwave_charge_response = charge.response_body[:1000]
-            result.curl_replay = charge.to_curl()
-            log.info("Flutterwave charge captured: %s", charge.url)
-        else:
-            log.warning("No Flutterwave /charges request captured!")
-
-        # Find the verify/mpesa polling requests (for curl replay without browser)
-        verify_reqs = self.browser.get_flutterwave_verify_requests()
-        if verify_reqs:
-            last_verify = verify_reqs[-1]
-            result.verify_url = last_verify.url
-            result.verify_request_body = last_verify.request_body
-            result.verify_last_response = last_verify.response_body[:1000]
-            result.verify_curl = last_verify.to_curl()
-            log.info("Verify endpoint captured: %s (%d polls)", last_verify.url, len(verify_reqs))
-            log.info("Verify body: %s", last_verify.request_body[:300])
-            log.info("Verify last response: %s", last_verify.response_body[:300])
-        else:
-            log.warning("No verify requests captured")
-
-        result.success = result.final_status in ("successful", "completed", "ussd_sent")
-        if loop_result.error and not result.error:
-            result.error = loop_result.error
-
-        return result
 
     def _friendly(self, status: str, network: str, raw: str,
                   ussd_sent: bool = False) -> str:

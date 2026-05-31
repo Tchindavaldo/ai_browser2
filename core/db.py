@@ -11,6 +11,7 @@ Tables (see schema/supabase.sql):
   - curl_templates(id, aggregator, template jsonb, created_at, updated_at)
 """
 
+import asyncio
 import dataclasses
 import logging
 from typing import Any
@@ -40,7 +41,7 @@ class Database:
         return self._client is not None
 
     # --- transactions audit ---
-    def save_transaction(
+    async def save_transaction(
         self, aggregator: str, mode: str, req: PaymentRequest, result: PaymentResult
     ) -> dict | None:
         if not self.enabled:
@@ -59,33 +60,40 @@ class Database:
             "charge_response": result.flutterwave_charge_response[:5000],
             "error_signals": result.error_signals,
         }
-        try:
+
+        def _insert():
             res = self._client.table("transactions").insert(row).execute()
             return res.data[0] if res.data else None
+
+        try:
+            # supabase-py is synchronous -> run off the event loop.
+            return await asyncio.to_thread(_insert)
         except Exception as e:  # noqa: BLE001
             log.warning("save_transaction failed: %s", e)
             return None
 
-    def list_transactions(self, limit: int = 50) -> list[dict]:
+    async def list_transactions(self, aggregator: str | None = None, limit: int = 50) -> list[dict]:
         if not self.enabled:
             return []
-        try:
-            res = (
-                self._client.table("transactions")
-                .select("*")
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
+
+        def _select():
+            q = self._client.table("transactions").select("*")
+            if aggregator:
+                q = q.eq("aggregator", aggregator)
+            res = q.order("created_at", desc=True).limit(limit).execute()
             return res.data or []
+
+        try:
+            return await asyncio.to_thread(_select)
         except Exception as e:  # noqa: BLE001
             log.warning("list_transactions failed: %s", e)
             return []
 
-    def get_transaction(self, transaction_ref: str) -> dict | None:
+    async def get_transaction(self, transaction_ref: str) -> dict | None:
         if not self.enabled:
             return None
-        try:
+
+        def _select():
             res = (
                 self._client.table("transactions")
                 .select("*")
@@ -94,30 +102,38 @@ class Database:
                 .execute()
             )
             return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_select)
         except Exception as e:  # noqa: BLE001
             log.warning("get_transaction failed: %s", e)
             return None
 
     # --- curl templates (deduced by browser mode, reused by replay mode) ---
-    def save_template(self, aggregator: str, template: CurlTemplate) -> dict | None:
+    async def save_template(self, aggregator: str, template: CurlTemplate) -> dict | None:
         if not self.enabled:
             return None
         row = {"aggregator": aggregator, "template": dataclasses.asdict(template)}
-        try:
+
+        def _upsert():
             res = (
                 self._client.table("curl_templates")
                 .upsert(row, on_conflict="aggregator")
                 .execute()
             )
             return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_upsert)
         except Exception as e:  # noqa: BLE001
             log.warning("save_template failed: %s", e)
             return None
 
-    def load_template(self, aggregator: str) -> CurlTemplate | None:
+    async def load_template(self, aggregator: str) -> CurlTemplate | None:
         if not self.enabled:
             return None
-        try:
+
+        def _select():
             res = (
                 self._client.table("curl_templates")
                 .select("template")
@@ -125,8 +141,11 @@ class Database:
                 .limit(1)
                 .execute()
             )
-            if res.data:
-                data: dict[str, Any] = res.data[0].get("template", {})
+            return res.data[0].get("template", {}) if res.data else None
+
+        try:
+            data: dict[str, Any] | None = await asyncio.to_thread(_select)
+            if data:
                 fields = {f.name for f in dataclasses.fields(CurlTemplate)}
                 return CurlTemplate(**{k: v for k, v in data.items() if k in fields})
         except Exception as e:  # noqa: BLE001

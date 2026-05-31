@@ -72,7 +72,10 @@ class PayRequest(BaseModel):
     sender_name: str = "Rauvalia"
     callback_url: str = ""
     aggregator: str = "digikuntz"
-    mode: str = "browser"  # "browser" | "replay"
+    mode: str = "auto"  # "auto" | "browser" | "replay"
+    # In auto mode, whether to fall back to the browser flow when replay is
+    # inconclusive (no template / failed / unknown). Caller decides (per plan).
+    fallback_browser: bool = True
 
 
 class PayResponse(BaseModel):
@@ -118,8 +121,8 @@ async def pay(req: PayRequest):
     cls = registry.get(req.aggregator)
     if cls is None:
         raise HTTPException(404, f"Unknown aggregator '{req.aggregator}'. Available: {registry.names()}")
-    if req.mode not in ("browser", "replay"):
-        raise HTTPException(400, f"Unknown mode '{req.mode}' (use 'browser' or 'replay')")
+    if req.mode not in ("auto", "browser", "replay"):
+        raise HTTPException(400, f"Unknown mode '{req.mode}' (use 'auto', 'browser' or 'replay')")
 
     agg = cls(browser=browser, llm=llm, db=db)
     payment = PaymentRequest(
@@ -131,28 +134,53 @@ async def pay(req: PayRequest):
         callback_url=req.callback_url,
     )
 
+    async def _run_browser_and_save():
+        """Browser flow + deduce/persist the curl template from the capture."""
+        res = await agg.pay_via_browser(payment)
+        charge = browser.get_charge_request(agg.charge_request_matcher)
+        if charge:
+            verify_reqs = browser.get_verify_requests(agg.verify_request_matcher)
+            template = agg.extract_curl_template(
+                charge, verify_reqs[-1] if verify_reqs else None, res.public_key
+            )
+            if template:
+                await db.save_template(req.aggregator, template)
+        return res
+
     if req.mode == "replay":
-        template = db.load_template(req.aggregator)
+        template = await db.load_template(req.aggregator)
         if template is None:
             raise HTTPException(
                 409,
                 f"No stored curl template for '{req.aggregator}'. Run mode='browser' once to deduce it.",
             )
         result = await agg.replay(payment, template)
-    else:
-        result = await agg.pay_via_browser(payment)
-        # Deduce + persist the curl template from the captured browser flow.
-        charge = browser.get_charge_request(agg.charge_request_matcher)
-        if charge:
-            verify_reqs = browser.get_verify_requests(agg.verify_request_matcher)
-            template = agg.extract_curl_template(
-                charge, verify_reqs[-1] if verify_reqs else None, result.public_key
-            )
-            if template:
-                db.save_template(req.aggregator, template)
+    elif req.mode == "browser":
+        result = await _run_browser_and_save()
+    else:  # auto: replay first, fall back to browser if inconclusive
+        template = await db.load_template(req.aggregator)
+        if template is not None:
+            try:
+                result = await agg.replay(payment, template)
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto: replay raised (%s)", e)
+                result = None
+            inconclusive = result is None or result.final_status in ("unknown", "timeout", "error", "")
+            if inconclusive and req.fallback_browser:
+                log.info("auto: replay inconclusive -> falling back to browser")
+                result = await _run_browser_and_save()
+            elif result is None:
+                raise HTTPException(502, "Replay failed and browser fallback disabled (fallback_browser=false)")
+        else:
+            if not req.fallback_browser:
+                raise HTTPException(
+                    409,
+                    f"No template for '{req.aggregator}' and fallback_browser=false. Run mode='browser' first.",
+                )
+            result = await _run_browser_and_save()
 
     # Audit the attempt (no-op if Supabase unconfigured).
-    db.save_transaction(req.aggregator, req.mode, payment, result)
+    await db.save_transaction(req.aggregator, req.mode, payment, result)
 
     return PayResponse(
         success=result.success,
@@ -180,15 +208,15 @@ async def pay(req: PayRequest):
 
 
 @app.get("/transactions")
-async def list_transactions(limit: int = 50):
+async def list_transactions(aggregator: str | None = None, limit: int = 50):
     """Recent transaction audit rows (empty if Supabase not configured)."""
-    return {"transactions": db.list_transactions(limit=limit)}
+    return {"transactions": await db.list_transactions(aggregator=aggregator, limit=limit)}
 
 
 @app.get("/status/{transaction_ref}")
 async def transaction_status(transaction_ref: str):
     """Look up a stored transaction by its reference."""
-    tx = db.get_transaction(transaction_ref)
+    tx = await db.get_transaction(transaction_ref)
     if tx is None:
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
     return tx

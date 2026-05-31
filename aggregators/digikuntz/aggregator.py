@@ -5,10 +5,13 @@ Adapter that exposes the existing browser_flow (AI-driven) and replay_flow
 itself in the registry under the name "digikuntz".
 """
 
+import contextlib
+import json
 import logging
 
 from core.base import Aggregator, CurlTemplate, PaymentRequest, PaymentResult
 from core.browser import CapturedRequest
+from core.browser_runner import run_browser_flow
 from core.config import settings
 from core.registry import register
 
@@ -18,22 +21,61 @@ from . import replay_flow
 log = logging.getLogger("ai_browser2")
 
 
+@contextlib.contextmanager
+def _apply_template(template: "CurlTemplate | None"):
+    """Temporarily override replay_flow module constants from a stored template.
+
+    step3_charge / step4_poll_verify read module-level FLW_* and HEADERS; this
+    lets a DB template drive the URLs/headers/pubkey without touching the tuned
+    retry/poll logic. Original values are restored on exit.
+    """
+    if not template:
+        yield
+        return
+    overrides = {
+        "FLW_CHARGE_URL": template.charge_url,
+        "FLW_VERIFY_URL": template.verify_url,
+        "FLW_INIT_URL": template.init_url,
+        "FLW_UPGRADE_URL": template.upgrade_url,
+        "FLW_PUB_KEY": template.flw_pub_key,
+    }
+    saved = {}
+    try:
+        for name, value in overrides.items():
+            if value:  # only override when the template actually has a value
+                saved[name] = getattr(replay_flow, name)
+                setattr(replay_flow, name, value)
+        if template.headers:
+            saved["HEADERS"] = replay_flow.HEADERS
+            replay_flow.HEADERS = dict(template.headers)
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(replay_flow, name, value)
+
+
 class DigikuntzAggregator(Aggregator):
     name = "digikuntz"
 
+    @property
+    def _agent(self) -> "browser_flow.DigikuntzAgent":
+        # Reuse one agent bound to this aggregator's browser/llm for callbacks.
+        agent = getattr(self, "_agent_cache", None)
+        if agent is None:
+            agent = browser_flow.DigikuntzAgent(self.browser, self.llm)
+            self._agent_cache = agent
+        return agent
+
     # --- transaction creation ---
     async def create_transaction(self, req: PaymentRequest) -> dict:
-        agent = browser_flow.DigikuntzAgent(self.browser, self.llm)
-        return await agent._create_transaction(req)
+        return await self._agent._create_transaction(req)
 
     # --- browser-IA hooks ---
     def browser_objective(self, req: PaymentRequest) -> str:
-        # The detailed objective is built inside DigikuntzAgent.pay; exposed here
-        # for the generic engine / introspection.
-        return (
-            f"Payer {req.amount} XAF via {self.network_label(req.network)} "
-            f"sur le numero {req.phone} (checkout Flutterwave dans l'iframe)."
-        )
+        return self._agent.browser_objective(req)
+
+    async def decide_browser_outcome(self, req, loop_result, result) -> None:
+        await self._agent.decide_browser_outcome(req, loop_result, result)
 
     def network_label(self, network: str) -> str:
         return replay_flow.network_label(network)
@@ -44,18 +86,36 @@ class DigikuntzAggregator(Aggregator):
     def verify_request_matcher(self, r: CapturedRequest) -> bool:
         return self.browser._flutterwave_verify_matcher(r)
 
+    def checkout_url_predicate(self, url: str) -> bool:
+        """True while the URL is still on the Flutterwave checkout (not redirected)."""
+        return any(
+            host in url
+            for host in ("flutterwave.com", "checkout-v3-ui-prod", "ravepay")
+        )
+
     # --- template extraction (browser mode -> DB) ---
     def extract_curl_template(
         self, charge: CapturedRequest, verify: "CapturedRequest | None", public_key: str
     ) -> CurlTemplate | None:
         if not charge:
             return None
+        # Best-effort payload skeleton from the captured charge body (keys only,
+        # values blanked) so replay can re-fill it from the request.
+        payload_skeleton: dict = {}
+        try:
+            body = json.loads(charge.request_body) if charge.request_body else {}
+            if isinstance(body, dict):
+                payload_skeleton = {k: "" for k in body}
+        except (json.JSONDecodeError, TypeError):
+            pass
         return CurlTemplate(
-            charge_url=charge.url,
+            charge_url=charge.url or settings.digikuntz.flw_charge_url,
             verify_url=verify.url if verify else settings.digikuntz.flw_verify_url,
             init_url=settings.digikuntz.flw_init_url,
             upgrade_url=settings.digikuntz.flw_upgrade_url,
+            hosted_pay_url="https://api.ravepay.co/flwv3-pug/getpaidx/api/hosted_pay",
             headers=dict(replay_flow.HEADERS),
+            payload_skeleton=payload_skeleton,
             public_key_rsa=public_key,
             flw_pub_key=settings.digikuntz.flw_pub_key,
         )
@@ -72,75 +132,78 @@ class DigikuntzAggregator(Aggregator):
 
     # --- browser mode (full AI-driven flow) ---
     async def pay_via_browser(self, req: PaymentRequest) -> PaymentResult:
-        agent = browser_flow.DigikuntzAgent(self.browser, self.llm)
-        return await agent.pay(req)
+        return await run_browser_flow(self, req)
 
     # --- replay mode (no browser) ---
     async def replay(self, req: PaymentRequest, template: CurlTemplate) -> PaymentResult:
         """Reproduce the payment using replay_flow steps (no browser).
 
-        Orchestrates step1..step4 directly, mirroring replay_flow.main() but
-        returning a PaymentResult instead of printing.
+        The stored template drives the URLs/headers/pubkey (via _apply_template);
+        step1..step4 retain their tuned retry/poll logic untouched.
         """
         result = PaymentResult()
-        try:
-            tx = await replay_flow.step1_create_transaction(
-                req.amount, req.phone, req.email, req.sender_name
-            )
-        except Exception as e:  # noqa: BLE001 — surface any creation failure
-            result.error = f"digikuntz create_transaction error: {e}"
-            return result
-
-        tx_ref = tx.get("transactionRef", "")
-        payment_link = tx.get("paymentLink", "")
-        total = int(tx.get("paymentWithTaxes", req.amount))
-        result.transaction_id = tx_ref
-        if not payment_link:
-            result.error = f"No paymentLink in response: {tx}"
-            return result
-
-        # RSA public key: prefer the stored template, else (re)initialize.
-        public_key_rsa = template.public_key_rsa if template else ""
-        if not public_key_rsa:
+        # Template overrides the FLW_* URLs / HEADERS for the whole replay.
+        with _apply_template(template):
             try:
-                checkout = await replay_flow.step2_initialize_checkout(payment_link)
-                public_key_rsa = checkout.get("public_key", "")
-            except Exception as e:  # noqa: BLE001
-                log.warning("replay step2 failed (%s), will rely on fallback key", e)
+                tx = await replay_flow.step1_create_transaction(
+                    req.amount, req.phone, req.email, req.sender_name
+                )
+            except Exception as e:  # noqa: BLE001 — surface any creation failure
+                result.error = f"digikuntz create_transaction error: {e}"
+                return result
 
-        charge = await replay_flow.step3_charge(
-            amount=total,
-            phone=req.phone,
-            network=req.network,
-            email=req.email,
-            firstname="API",
-            lastname=f"Call: {req.sender_name}",
-            tx_ref=tx_ref,
-            public_key_rsa=public_key_rsa,
-        )
-        charge_resp = charge.get("charge_response", {})
-        result.flutterwave_charge_response = str(charge_resp)[:1000]
+            tx_ref = tx.get("transactionRef", "")
+            payment_link = tx.get("paymentLink", "")
+            total = int(tx.get("paymentWithTaxes", req.amount))
+            result.transaction_id = tx_ref
+            if not payment_link:
+                result.error = f"No paymentLink in response: {tx}"
+                return result
 
-        verdict = self.interpret_status("charge", charge_resp, req.network)
-        if verdict:
-            result.final_status, result.final_message = verdict
-            result.success = result.final_status == "successful"
-            return result
+            # RSA public key: prefer the stored template, else (re)initialize.
+            public_key_rsa = template.public_key_rsa if template else ""
+            if not public_key_rsa:
+                try:
+                    checkout = await replay_flow.step2_initialize_checkout(payment_link)
+                    public_key_rsa = checkout.get("public_key", "")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("replay step2 failed (%s), will rely on fallback key", e)
 
-        # Extract flw_ref then poll verify (17-min clock budget lives in step4).
-        charge_data = charge_resp.get("data", {})
-        flw_ref = ""
-        if isinstance(charge_data, dict):
-            flw_ref = charge_data.get("flw_ref", "")
+            charge = await replay_flow.step3_charge(
+                amount=total,
+                phone=req.phone,
+                network=req.network,
+                email=req.email,
+                firstname="API",
+                lastname=f"Call: {req.sender_name}",
+                tx_ref=tx_ref,
+                public_key_rsa=public_key_rsa,
+            )
+            charge_resp = charge.get("charge_response", {})
+            result.flutterwave_charge_response = str(charge_resp)[:1000]
+
+            verdict = self.interpret_status("charge", charge_resp, req.network)
+            if verdict:
+                result.final_status, result.final_message = verdict
+                result.success = result.final_status == "successful"
+                result.payment_status = result.final_status
+                return result
+
+            # Extract flw_ref then poll verify (17-min clock budget lives in step4).
+            charge_data = charge_resp.get("data", {})
+            flw_ref = ""
+            if isinstance(charge_data, dict):
+                flw_ref = charge_data.get("flw_ref", "")
+                if not flw_ref:
+                    nested = charge_data.get("data", {})
+                    if isinstance(nested, dict):
+                        flw_ref = nested.get("flw_reference", "")
             if not flw_ref:
-                nested = charge_data.get("data", {})
-                if isinstance(nested, dict):
-                    flw_ref = nested.get("flw_reference", "")
-        if not flw_ref:
-            result.error = "No flw_ref in charge response"
-            return result
+                result.error = "No flw_ref in charge response"
+                return result
 
-        verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref)
+            verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref)
+
         verdict = self.interpret_status("verify", verify, req.network)
         if verdict:
             result.final_status, result.final_message = verdict
