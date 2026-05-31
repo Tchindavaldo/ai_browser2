@@ -195,6 +195,105 @@
         }
       }
     },
+    "/aggregators/{name}/template": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Template curl actif d'un agrégateur",
+        "description": "Renvoie le template de replay actif de l'agrégateur (404 si aucun).",
+        "operationId": "get_template_aggregators__name__template_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agrégateur inconnu ou aucun template actif."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Ajouter/mettre à jour manuellement le template curl",
+        "description": "Ajoute manuellement un template de replay pour l'agrégateur.\n\nPar défaut **append-si-différent** (comme le mode browser) : si identique à\nl'actif, rien n'est ajouté. `force=true` crée toujours une nouvelle version.",
+        "operationId": "set_template_aggregators__name__template_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agrégateur inconnu."
+          },
+          "503": {
+            "description": "Supabase non configuré (persistance désactivée)."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/drive": {
       "post": {
         "tags": [
@@ -517,6 +616,64 @@
           "success"
         ],
         "title": "PayResponse"
+      },
+      "TemplateBody": {
+        "properties": {
+          "charge_url": {
+            "type": "string",
+            "title": "Charge Url",
+            "default": ""
+          },
+          "verify_url": {
+            "type": "string",
+            "title": "Verify Url",
+            "default": ""
+          },
+          "init_url": {
+            "type": "string",
+            "title": "Init Url",
+            "default": ""
+          },
+          "upgrade_url": {
+            "type": "string",
+            "title": "Upgrade Url",
+            "default": ""
+          },
+          "hosted_pay_url": {
+            "type": "string",
+            "title": "Hosted Pay Url",
+            "default": ""
+          },
+          "headers": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Headers"
+          },
+          "payload_skeleton": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload Skeleton"
+          },
+          "public_key_rsa": {
+            "type": "string",
+            "title": "Public Key Rsa",
+            "default": ""
+          },
+          "flw_pub_key": {
+            "type": "string",
+            "title": "Flw Pub Key",
+            "default": ""
+          },
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "description": "Forcer une nouvelle version même si identique à l'actif.",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "TemplateBody",
+        "description": "Champs du curl template (tous optionnels — seuls ceux fournis sont posés)."
       },
       "ValidationError": {
         "properties": {

@@ -154,10 +154,13 @@ class Database:
             return None
 
     # --- curl templates (deduced by browser mode, reused by replay mode) ---
-    async def save_template(self, aggregator: str, template: CurlTemplate) -> dict | None:
+    async def save_template(
+        self, aggregator: str, template: CurlTemplate, force: bool = False
+    ) -> dict | None:
         """Append a NEW active version ONLY if it differs from the current active
-        one. Never overwrites: the previous version is deactivated and kept as
-        history. Rows stay grouped per aggregator (one active each)."""
+        one (or always, when force=True). Never overwrites: the previous version
+        is deactivated and kept as history. Rows stay grouped per aggregator
+        (one active each)."""
         if not self.enabled:
             return None
         payload = dataclasses.asdict(template)
@@ -173,7 +176,7 @@ class Database:
                 .limit(1)
                 .execute()
             )
-            if cur.data and cur.data[0].get("template") == payload:
+            if not force and cur.data and cur.data[0].get("template") == payload:
                 return cur.data[0]  # identical -> nothing to add
             # Deactivate the old active version, then insert the new active one.
             if cur.data:

@@ -82,6 +82,8 @@ FastAPI génère automatiquement la doc OpenAPI :
 | POST | `/pay` | exécuter un paiement (aggregator + mode) |
 | GET | `/transactions?aggregator=&limit=` | historique (Supabase) |
 | GET | `/status/{transaction_ref}` | statut d'une transaction |
+| GET | `/aggregators/{name}/template` | template curl actif d'un agrégateur |
+| POST | `/aggregators/{name}/template` | ajouter/mettre à jour manuellement le template |
 | POST | `/drive` | pilotage libre du navigateur (dev) |
 | POST | `/test-llm` | ping du LLM (dev) |
 
@@ -143,6 +145,26 @@ Créer les tables via `schema/supabase.sql` puis renseigner `SUPABASE_URL`/`SUPA
 
 Les appels Supabase (synchrones) sont exécutés via `asyncio.to_thread` pour ne pas bloquer
 la boucle asynchrone (ni le navigateur unique).
+
+### Template manuel
+
+Amorcer/corriger le template de replay sans passer par le mode browser :
+
+```bash
+# Lire le template actif
+curl localhost:7332/aggregators/digikuntz/template
+
+# Ajouter/mettre à jour (append-si-différent ; force=true pour forcer une version)
+curl -X POST localhost:7332/aggregators/digikuntz/template \
+  -H 'content-type: application/json' -d '{
+    "charge_url": "https://api.ravepay.co/flwv3-pug/getpaidx/api/charge?use_polling=1",
+    "verify_url": "https://api.ravepay.co/flwv3-pug/getpaidx/api/verify/mpesa",
+    "public_key_rsa": "<clé RSA cryptico>",
+    "flw_pub_key": "FLWPUBK-...-X",
+    "headers": {"content-type": "application/json", "x-flw-lang": "FR"},
+    "force": false
+  }'
+```
 
 ---
 

@@ -7,6 +7,7 @@ A payment is dispatched by (aggregator, mode):
 Every attempt is audited in the transactions table (when Supabase is configured).
 """
 
+import dataclasses
 import logging
 import sys
 
@@ -16,7 +17,7 @@ from contextlib import asynccontextmanager
 
 # Importing the aggregators package registers all aggregators in the registry.
 import aggregators.digikuntz  # noqa: F401
-from core.base import PaymentRequest
+from core.base import CurlTemplate, PaymentRequest
 from core.browser import BrowserController
 from core.config import settings
 from core.db import db
@@ -352,6 +353,61 @@ async def transaction_status(transaction_ref: str):
     if tx is None:
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
     return tx
+
+
+class TemplateBody(BaseModel):
+    """Champs du curl template (tous optionnels — seuls ceux fournis sont posés)."""
+    charge_url: str = ""
+    verify_url: str = ""
+    init_url: str = ""
+    upgrade_url: str = ""
+    hosted_pay_url: str = ""
+    headers: dict = Field(default_factory=dict)
+    payload_skeleton: dict = Field(default_factory=dict)
+    public_key_rsa: str = ""
+    flw_pub_key: str = ""
+    force: bool = Field(False, description="Forcer une nouvelle version même si identique à l'actif.")
+
+
+@app.get(
+    "/aggregators/{name}/template",
+    tags=["transactions"],
+    summary="Template curl actif d'un agrégateur",
+    responses={404: {"description": "Agrégateur inconnu ou aucun template actif."}},
+)
+async def get_template(name: str):
+    """Renvoie le template de replay actif de l'agrégateur (404 si aucun)."""
+    if registry.get(name) is None:
+        raise HTTPException(404, {"error": "unknown_aggregator", "supported_aggregators": registry.names()})
+    tpl = await db.load_template(name)
+    if tpl is None:
+        raise HTTPException(404, f"No active template for '{name}'. Run mode='browser' or POST one.")
+    return {"aggregator": name, "template": dataclasses.asdict(tpl)}
+
+
+@app.post(
+    "/aggregators/{name}/template",
+    tags=["transactions"],
+    summary="Ajouter/mettre à jour manuellement le template curl",
+    responses={
+        404: {"description": "Agrégateur inconnu."},
+        503: {"description": "Supabase non configuré (persistance désactivée)."},
+    },
+)
+async def set_template(name: str, body: TemplateBody):
+    """Ajoute manuellement un template de replay pour l'agrégateur.
+
+    Par défaut **append-si-différent** (comme le mode browser) : si identique à
+    l'actif, rien n'est ajouté. `force=true` crée toujours une nouvelle version.
+    """
+    if registry.get(name) is None:
+        raise HTTPException(404, {"error": "unknown_aggregator", "supported_aggregators": registry.names()})
+    if not db.enabled:
+        raise HTTPException(503, "Supabase non configuré — impossible de persister le template.")
+    fields = {f.name for f in dataclasses.fields(CurlTemplate)}
+    tpl = CurlTemplate(**{k: v for k, v in body.model_dump().items() if k in fields})
+    saved = await db.save_template(name, tpl, force=body.force)
+    return {"aggregator": name, "saved": saved, "template": dataclasses.asdict(tpl)}
 
 
 class DriveRequest(BaseModel):
