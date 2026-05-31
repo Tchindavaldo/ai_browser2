@@ -136,8 +136,10 @@ Créer les tables via `schema/supabase.sql` puis renseigner `SUPABASE_URL`/`SUPA
 - `transactions` — audit d'une tentative. Insérée en **`pending`** dès le départ, puis
   **mise à jour** (`status`/`success`/`message`) au verdict final. Un paiement ne peut pas
   être lancé sur un numéro qui a déjà une transaction `pending` (→ **409 `pending_exists`**).
-- `curl_templates` — template de replay réutilisable, **un par agrégateur** (déduit en
-  mode browser, rechargé en mode replay).
+- `curl_templates` — templates de replay **versionnés par agrégateur** (jamais mélangés).
+  Le mode browser **ajoute** une nouvelle version **uniquement si la recette a changé**
+  (sinon rien) ; la précédente est désactivée mais **conservée en historique**. Exactement
+  une ligne `is_active=true` par agrégateur — c'est celle que le mode replay recharge.
 
 Les appels Supabase (synchrones) sont exécutés via `asyncio.to_thread` pour ne pas bloquer
 la boucle asynchrone (ni le navigateur unique).

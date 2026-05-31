@@ -27,24 +27,21 @@ create index if not exists transactions_pending_idx
     on transactions (aggregator, phone)
     where status = 'pending';
 
--- Reusable per-aggregator curl-replay template, deduced by the browser mode.
+-- Versioned per-aggregator curl-replay templates, deduced by the browser mode.
+-- We NEVER overwrite: a new version is appended only when the deduced template
+-- differs from the current active one. Rows are grouped per `aggregator`
+-- (never mixed); exactly one row per aggregator has is_active = true (the one
+-- the replay mode uses). Older versions are kept as history.
 create table if not exists curl_templates (
     id          bigint generated always as identity primary key,
-    aggregator  text        not null unique,
+    aggregator  text        not null,
     template    jsonb       not null,
-    created_at  timestamptz not null default now(),
-    updated_at  timestamptz not null default now()
+    is_active   boolean     not null default true,
+    created_at  timestamptz not null default now()
 );
 
-create or replace function set_updated_at()
-returns trigger as $$
-begin
-    new.updated_at = now();
-    return new;
-end;
-$$ language plpgsql;
-
-drop trigger if exists curl_templates_updated_at on curl_templates;
-create trigger curl_templates_updated_at
-    before update on curl_templates
-    for each row execute function set_updated_at();
+create index if not exists curl_templates_aggregator_idx on curl_templates (aggregator);
+-- At most one active template per aggregator.
+create unique index if not exists curl_templates_active_idx
+    on curl_templates (aggregator)
+    where is_active;

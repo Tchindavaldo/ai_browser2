@@ -155,25 +155,46 @@ class Database:
 
     # --- curl templates (deduced by browser mode, reused by replay mode) ---
     async def save_template(self, aggregator: str, template: CurlTemplate) -> dict | None:
+        """Append a NEW active version ONLY if it differs from the current active
+        one. Never overwrites: the previous version is deactivated and kept as
+        history. Rows stay grouped per aggregator (one active each)."""
         if not self.enabled:
             return None
-        row = {"aggregator": aggregator, "template": dataclasses.asdict(template)}
+        payload = dataclasses.asdict(template)
 
-        def _upsert():
+        def _save_if_changed():
+            client = self._client
+            # Current active template for this aggregator (if any).
+            cur = (
+                client.table("curl_templates")
+                .select("id, template")
+                .eq("aggregator", aggregator)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if cur.data and cur.data[0].get("template") == payload:
+                return cur.data[0]  # identical -> nothing to add
+            # Deactivate the old active version, then insert the new active one.
+            if cur.data:
+                client.table("curl_templates").update({"is_active": False}).eq(
+                    "id", cur.data[0]["id"]
+                ).execute()
             res = (
-                self._client.table("curl_templates")
-                .upsert(row, on_conflict="aggregator")
+                client.table("curl_templates")
+                .insert({"aggregator": aggregator, "template": payload, "is_active": True})
                 .execute()
             )
             return res.data[0] if res.data else None
 
         try:
-            return await asyncio.to_thread(_upsert)
+            return await asyncio.to_thread(_save_if_changed)
         except Exception as e:  # noqa: BLE001
             log.warning("save_template failed: %s", e)
             return None
 
     async def load_template(self, aggregator: str) -> CurlTemplate | None:
+        """Load the active template for this aggregator (the one replay uses)."""
         if not self.enabled:
             return None
 
@@ -182,6 +203,7 @@ class Database:
                 self._client.table("curl_templates")
                 .select("template")
                 .eq("aggregator", aggregator)
+                .eq("is_active", True)
                 .limit(1)
                 .execute()
             )
