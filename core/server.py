@@ -11,7 +11,7 @@ import logging
 import sys
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
 # Importing the aggregators package registers all aggregators in the registry.
@@ -61,60 +61,121 @@ async def lifespan(app: FastAPI):
     await browser.stop()
 
 
-app = FastAPI(title="MobileWallet backend", lifespan=lifespan)
+API_DESCRIPTION = """
+Backend **MobileWallet** — un rassemblement d'**agrégateurs** de paiement Mobile Money.
+
+Chaque agrégateur (DigiKUNTZ aujourd'hui, d'autres demain) est un module exposant
+deux capacités :
+
+- **navigateur IA** (`mode=browser`) : un agent Playwright + LLM pilote le checkout,
+  exécute le paiement et **déduit** le « curl replay » (requête `/charge` + `/verify`),
+  persisté comme *template* réutilisable.
+- **curl replay** (`mode=replay`) : rejoue le paiement sans navigateur via le template stocké.
+- **auto** (`mode=auto`, défaut) : tente le replay d'abord, puis bascule sur le navigateur
+  si le replay est non concluant (`fallback_browser`).
+
+Toute tentative est auditée (table `transactions`) quand Supabase est configuré.
+"""
+
+OPENAPI_TAGS = [
+    {"name": "system", "description": "Santé et introspection du service."},
+    {"name": "payments", "description": "Exécution des paiements via les agrégateurs."},
+    {"name": "transactions", "description": "Historique et statut des transactions (Supabase)."},
+    {"name": "dev", "description": "Outils de développement (pilotage libre, ping LLM)."},
+]
+
+app = FastAPI(
+    title="MobileWallet backend",
+    version="0.2",
+    description=API_DESCRIPTION,
+    openapi_tags=OPENAPI_TAGS,
+    lifespan=lifespan,
+)
 
 
 class PayRequest(BaseModel):
-    amount: int
-    phone: str
-    network: str
-    email: str
-    sender_name: str = "Rauvalia"
-    callback_url: str = ""
-    aggregator: str = "digikuntz"
-    mode: str = "auto"  # "auto" | "browser" | "replay"
-    # In auto mode, whether to fall back to the browser flow when replay is
-    # inconclusive (no template / failed / unknown). Caller decides (per plan).
-    fallback_browser: bool = True
+    amount: int = Field(..., description="Montant en XAF.", examples=[25])
+    phone: str = Field(..., description="Numéro Mobile Money (sans +237).", examples=["696080087"])
+    network: str = Field(..., description="Réseau : Orangemoney ou MTN.", examples=["Orangemoney"])
+    email: str = Field(..., description="Email du payeur.", examples=["client@example.com"])
+    sender_name: str = Field("Rauvalia", description="Nom affiché de l'émetteur.")
+    callback_url: str = Field("", description="URL de callback (défaut: celle de l'agrégateur).")
+    aggregator: str = Field("digikuntz", description="Nom de l'agrégateur (cf. GET /aggregators).")
+    mode: str = Field("auto", description="auto | browser | replay.", examples=["auto"])
+    fallback_browser: bool = Field(
+        True,
+        description="En mode auto : basculer sur le navigateur si le replay est non concluant.",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "amount": 25, "phone": "696080087", "network": "Orangemoney",
+                    "email": "client@example.com", "aggregator": "digikuntz",
+                    "mode": "auto", "fallback_browser": True,
+                }
+            ]
+        }
+    }
 
 
 class PayResponse(BaseModel):
-    success: bool
-    error: str = ""
-    transaction_id: str = ""
+    success: bool = Field(..., description="Vrai si le paiement a abouti.")
+    error: str = Field("", description="Message d'erreur technique éventuel.")
+    transaction_id: str = Field("", description="Référence transaction de l'agrégateur.")
     payment_status: str = ""
-    turns: int = 0
+    turns: int = Field(0, description="Nombre de tours de l'agent IA (mode browser).")
     input_tokens: int = 0
     output_tokens: int = 0
     flutterwave_charge_url: str = ""
     flutterwave_charge_body: str = ""
     flutterwave_charge_response: str = ""
-    curl_replay: str = ""
+    curl_replay: str = Field("", description="Commande curl reproductible déduite.")
     plaintext_payload: str = ""
     public_key: str = ""
     verify_url: str = ""
     verify_request_body: str = ""
     verify_last_response: str = ""
     verify_curl: str = ""
-    final_status: str = ""
-    final_message: str = ""
+    final_status: str = Field("", description="successful | failed | cancelled | pending | unknown.")
+    final_message: str = Field("", description="Message clair pour l'utilisateur final.")
     error_signals: dict = {}
     captured_requests: list[dict] = []
 
 
-@app.get("/health")
+@app.get("/health", tags=["system"], summary="Santé du service")
 async def health():
+    """Statut du service + liste des agrégateurs enregistrés."""
     return {"status": "ok", "version": "0.2", "aggregators": registry.names()}
 
 
-@app.get("/aggregators")
+@app.get("/aggregators", tags=["system"], summary="Agrégateurs disponibles")
 async def list_aggregators():
-    """List the available aggregators (registered modules)."""
+    """Liste les agrégateurs (modules) enregistrés dans le registre."""
     return {"aggregators": registry.names()}
 
 
-@app.post("/pay", response_model=PayResponse)
+@app.post(
+    "/pay",
+    response_model=PayResponse,
+    tags=["payments"],
+    summary="Exécuter un paiement",
+    responses={
+        404: {"description": "Agrégateur inconnu."},
+        400: {"description": "Mode invalide."},
+        409: {"description": "Mode replay sans template (lancer mode=browser d'abord)."},
+        502: {"description": "Replay échoué et fallback navigateur désactivé."},
+    },
+)
 async def pay(req: PayRequest):
+    """Exécute un paiement via l'agrégateur et le mode demandés.
+
+    - **auto** (défaut) : replay d'abord ; bascule navigateur si non concluant
+      (selon `fallback_browser`).
+    - **browser** : flux IA complet ; déduit et persiste le template curl.
+    - **replay** : rejoue via le template stocké (409 si absent).
+    """
     if not browser or not llm:
         raise HTTPException(500, "Not initialized")
 
@@ -207,15 +268,23 @@ async def pay(req: PayRequest):
     )
 
 
-@app.get("/transactions")
+@app.get("/transactions", tags=["transactions"], summary="Historique des transactions")
 async def list_transactions(aggregator: str | None = None, limit: int = 50):
-    """Recent transaction audit rows (empty if Supabase not configured)."""
+    """Dernières transactions auditées (vide si Supabase non configuré).
+
+    Filtre optionnel par `aggregator`.
+    """
     return {"transactions": await db.list_transactions(aggregator=aggregator, limit=limit)}
 
 
-@app.get("/status/{transaction_ref}")
+@app.get(
+    "/status/{transaction_ref}",
+    tags=["transactions"],
+    summary="Statut d'une transaction",
+    responses={404: {"description": "Aucune transaction pour cette référence."}},
+)
 async def transaction_status(transaction_ref: str):
-    """Look up a stored transaction by its reference."""
+    """Récupère une transaction stockée par sa référence."""
     tx = await db.get_transaction(transaction_ref)
     if tx is None:
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
@@ -229,7 +298,7 @@ class DriveRequest(BaseModel):
     network: str = ""
 
 
-@app.post("/drive")
+@app.post("/drive", tags=["dev"], summary="Pilotage libre du navigateur (dev)")
 async def drive(req: DriveRequest):
     """Drive the browser to a URL and let the AI agent handle it."""
     if not browser or not llm:
@@ -268,7 +337,7 @@ async def drive(req: DriveRequest):
     }
 
 
-@app.post("/test-llm")
+@app.post("/test-llm", tags=["dev"], summary="Ping du LLM (dev)")
 async def test_llm():
     """Quick test: send a simple prompt to DeepSeek and return the response."""
     if not llm:
