@@ -36,6 +36,10 @@ Après toute modif des endpoints/modèles dans `core/server.py`, régénérer la
 
 ## Base de données
 
-Les changements de schéma vont dans `schema/supabase.sql` (idempotent : `if not
-exists`). L'utilisateur les applique côté Supabase. Ne jamais modifier une ligne
-de la base sans accord explicite de l'utilisateur.
+- `schema/supabase.sql` = **schéma de base** (tables initiales). Ne pas y empiler
+  les évolutions.
+- Chaque **évolution de schéma** (nouvelle table, colonne, index) va dans son
+  **propre fichier dédié** : `schema/migrations/NNN_description.sql`, numéroté et
+  **idempotent** (`if not exists`). Une migration = un fichier.
+- L'utilisateur applique les migrations côté Supabase. Ne jamais modifier une
+  ligne de la base sans accord explicite de l'utilisateur.
