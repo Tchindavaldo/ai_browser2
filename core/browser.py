@@ -58,6 +58,9 @@ class BrowserController:
         # Console messages + network failures (for error detection)
         self.console_messages: list[dict] = []
         self.failed_requests: list[dict] = []
+        # In-flight tracking: requests started but not yet finished/failed.
+        # Used to detect assets that stall forever (form-load debugging).
+        self._inflight: dict[str, dict] = {}
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -86,6 +89,9 @@ class BrowserController:
         self.page.on("pageerror", self._on_page_error)
         # Capture failed network requests (DNS/timeout/refused/aborted)
         self.page.on("requestfailed", self._on_request_failed)
+        # Track in-flight requests to detect assets that never finish.
+        self.page.on("request", self._on_request_started)
+        self.page.on("requestfinished", self._on_request_finished)
         log.info("Browser started (headless=%s)", self._headless)
 
     def _on_console(self, msg):
@@ -122,10 +128,42 @@ class BrowserController:
                 "timestamp": time.time(),
             }
             self.failed_requests.append(entry)
+            self._inflight.pop(request.url, None)
             log.info("RequestFailed: %s %s — %s",
                      entry["method"], entry["url"][:100], entry["error"])
         except Exception:
             pass
+
+    def _on_request_started(self, request):
+        try:
+            self._inflight[request.url] = {
+                "url": request.url,
+                "method": request.method,
+                "resource_type": request.resource_type,
+                "started_at": time.time(),
+            }
+        except Exception:
+            pass
+
+    def _on_request_finished(self, request):
+        try:
+            self._inflight.pop(request.url, None)
+        except Exception:
+            pass
+
+    def get_pending_requests(self, min_age_s: float = 0.0) -> list[dict]:
+        """Requests started but never finished/failed (stalled assets).
+
+        `min_age_s` filters to those in flight for at least that long — useful
+        to flag truly stuck assets (e.g. JS bundles) vs requests just started.
+        """
+        now = time.time()
+        out = []
+        for entry in self._inflight.values():
+            age = now - entry["started_at"]
+            if age >= min_age_s:
+                out.append({**entry, "age_s": round(age, 1)})
+        return sorted(out, key=lambda e: e["age_s"], reverse=True)
 
     def reset_diagnostics(self):
         """Clear console + failed-request buffers (call before clicking Pay)."""

@@ -13,6 +13,7 @@ The aggregator supplies the specifics through its interface:
 The USSD/operator-specific semantics stay inside the aggregator (per plan §2).
 """
 
+import json
 import logging
 
 from core.base import Aggregator, PaymentRequest, PaymentResult
@@ -55,11 +56,13 @@ async def run_browser_flow(
     # 3. Navigate + enter iframe + hook crypto (non-blocking; agent recovers).
     await browser.goto(payment_link)
     await browser.wait(ms=3000)
+    form_ready = False
     try:
         await browser.enter_iframe("iframe")
         try:
             frame = getattr(browser, "_active_frame", browser.page)
             await frame.wait_for_selector("#phone", timeout=6000)
+            form_ready = True
         except Exception:
             pass  # form not ready yet — the agent will recover
         await browser.hook_crypto()
@@ -67,6 +70,35 @@ async def run_browser_flow(
     except Exception as e:  # noqa: BLE001
         log.warning("Could not enter iframe yet (%s) — agent will retry", e)
         browser._active_frame = browser.page
+
+    # DEBUG (form-load): when the form isn't ready on first paint, snapshot WHY —
+    # stalled assets (pending requests), console errors, failed/HTTP errors — so
+    # the cause is visible in the trace instead of being hidden by the agent's
+    # recovery (reload). Recorded as a synthetic turn-0 trace entry.
+    if not form_ready:
+        pending = browser.get_pending_requests(min_age_s=2.0)
+        signals = browser.get_error_signals()
+        diag = {
+            "turn": 0,
+            "phase": "form_not_ready",
+            "pending_requests": [
+                {"url": p["url"][:160], "type": p.get("resource_type", ""),
+                 "age_s": p["age_s"]}
+                for p in pending[:15]
+            ],
+            "failed_requests": signals.get("failed_requests", [])[:10],
+            "console_errors": [e.get("text", "")[:200]
+                               for e in signals.get("console_errors", [])][:10],
+            "http_errors": [{"url": h["url"][:160], "status": h["status"]}
+                            for h in signals.get("http_errors", [])][:10],
+        }
+        log.warning("🔍 FORM NON PRÊT — diagnostic chargement:")
+        log.warning("   pending(>2s): %d | failed: %d | console_err: %d | http_err: %d",
+                    len(pending), len(diag["failed_requests"]),
+                    len(diag["console_errors"]), len(diag["http_errors"]))
+        for p in diag["pending_requests"][:8]:
+            log.warning("   ⏳ %ss %s %s", p["age_s"], p["type"], p["url"])
+        result.form_load_diagnostic = diag
 
     # 4. Run the reasoning loop on the aggregator's objective.
     browser.reset_diagnostics()
@@ -76,6 +108,23 @@ async def run_browser_flow(
     result.input_tokens = loop_result.total_input_tokens
     result.output_tokens = loop_result.total_output_tokens
     result.trace = loop_result.trace
+    # Surface the form-load diagnostic as a turn-0 entry in the trace.
+    if result.form_load_diagnostic:
+        d = result.form_load_diagnostic
+        result.trace = [{
+            "turn": 0,
+            "url": payment_link,
+            "elements": 0,
+            "thought": "[DEBUG form-load] formulaire non prêt au 1er affichage",
+            "actions": [],
+            "objective_reached": False,
+            "error": json.dumps({
+                "pending_requests": d["pending_requests"],
+                "failed_requests": d["failed_requests"],
+                "console_errors": d["console_errors"],
+                "http_errors": d["http_errors"],
+            }, ensure_ascii=False)[:4000],
+        }] + (result.trace or [])
 
     # 5. Capture plaintext payload from the crypto hook.
     plaintexts = await browser.get_captured_plaintexts()
