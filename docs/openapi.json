@@ -195,6 +195,50 @@
         }
       }
     },
+    "/transactions/{transaction_ref}/trace": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Trace IA d'une transaction (mode browser)",
+        "description": "Renvoie la trace tour-par-tour de l'agent IA pour une transaction browser.\n\nChaque entrée : ce que l'IA a vu (url, nb d'éléments), sa pensée, les actions\njouées, et si l'objectif a été atteint. Vide pour un paiement en mode replay.",
+        "operationId": "transaction_trace_transactions__transaction_ref__trace_get",
+        "parameters": [
+          {
+            "name": "transaction_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Transaction Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Aucune transaction pour cette référence."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/transactions/{tx_id}/cancel": {
       "post": {
         "tags": [

@@ -29,6 +29,11 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     stream=sys.stdout,
 )
+# Quiet the noisy third-party loggers so the AI workflow stands out in the
+# console. Each HTTP call to DeepSeek/Supabase and every access line used to
+# drown the agent's thoughts/actions.
+for noisy in ("httpx", "httpcore", "uvicorn.access", "hpack", "openai"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("ai_browser2")
 
 # Global state
@@ -353,6 +358,25 @@ async def transaction_status(transaction_ref: str):
     if tx is None:
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
     return tx
+
+
+@app.get(
+    "/transactions/{transaction_ref}/trace",
+    tags=["transactions"],
+    summary="Trace IA d'une transaction (mode browser)",
+    responses={404: {"description": "Aucune transaction pour cette référence."}},
+)
+async def transaction_trace(transaction_ref: str):
+    """Renvoie la trace tour-par-tour de l'agent IA pour une transaction browser.
+
+    Chaque entrée : ce que l'IA a vu (url, nb d'éléments), sa pensée, les actions
+    jouées, et si l'objectif a été atteint. Vide pour un paiement en mode replay.
+    """
+    tx = await db.get_transaction(transaction_ref)
+    if tx is None:
+        raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
+    traces = await db.get_traces(tx["id"])
+    return {"transaction_ref": transaction_ref, "turns": len(traces), "trace": traces}
 
 
 @app.post(

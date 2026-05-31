@@ -45,3 +45,22 @@ create index if not exists curl_templates_aggregator_idx on curl_templates (aggr
 create unique index if not exists curl_templates_active_idx
     on curl_templates (aggregator)
     where is_active;
+
+-- Per-turn AI reasoning trace for a browser-mode payment. One row per turn,
+-- linked to its transaction. Lets you replay exactly what the agent saw,
+-- thought and did (live console + GET /transactions/{ref}/trace).
+create table if not exists transaction_traces (
+    id              bigint generated always as identity primary key,
+    transaction_id  bigint      not null references transactions (id) on delete cascade,
+    turn            integer     not null,
+    url             text,
+    elements        integer,                         -- nb of interactive elements seen
+    thought         text,                            -- the agent's reasoning that turn
+    actions         jsonb,                           -- list of action labels taken
+    objective_reached boolean   not null default false,
+    error           text,                            -- set if the turn failed (snapshot/LLM)
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists transaction_traces_tx_idx
+    on transaction_traces (transaction_id, turn);

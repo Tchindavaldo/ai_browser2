@@ -77,6 +77,9 @@ class LoopResult:
     turns: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    # Per-turn trace of what the AI saw/thought/did — for live console logs and
+    # the persisted, queryable trace (GET /transactions/{ref}/trace).
+    trace: list[dict] = field(default_factory=list)
 
 
 class ReasoningLoop:
@@ -105,21 +108,18 @@ class ReasoningLoop:
                 break
 
             result.turns = turn + 1
-            log.info("=== Turn %d/%d ===", turn + 1, self.max_turns)
+            n = turn + 1
+            log.info("┌─ 🤖 IA tour %d/%d ─────────────────────", n, self.max_turns)
 
             # 1. Snapshot
             try:
                 snap = await self.browser.snapshot()
-                log.info(
-                    "Snapshot: url=%s html=%d screenshot=%d elements=%d",
-                    snap.url,
-                    len(snap.outer_html),
-                    len(snap.screenshot_b64),
-                    len(snap.interactive_elements),
-                )
+                log.info("│ 👁  vu: %d éléments interactifs | url=%s",
+                         len(snap.interactive_elements), snap.url)
             except Exception as e:
-                log.error("Snapshot failed: %s", e)
+                log.error("│ ❌ snapshot échoué: %s", e)
                 result.error = f"snapshot failed: {e}"
+                result.trace.append({"turn": n, "error": f"snapshot failed: {e}"})
                 break
 
             # 2. Build prompt and send to LLM
@@ -130,42 +130,61 @@ class ReasoningLoop:
             result.total_output_tokens += llm_resp.output_tokens
 
             if not llm_resp.success:
-                log.error("LLM error: %s", llm_resp.error)
+                log.error("│ ❌ LLM erreur: %s", llm_resp.error)
                 result.error = f"LLM error: {llm_resp.error}"
+                result.trace.append({"turn": n, "error": f"LLM error: {llm_resp.error}"})
                 break
-
-            log.info("LLM response (%d chars): %s", len(llm_resp.text), llm_resp.text[:300])
 
             # 3. Parse decision
             decision = AgentDecision.parse(llm_resp.text)
-            log.info("Thought: %s", decision.thought[:200])
+            log.info("│ 🧠 pensée: %s", decision.thought[:300])
+
+            # Record this turn's trace entry.
+            entry = {
+                "turn": n,
+                "url": snap.url,
+                "elements": len(snap.interactive_elements),
+                "thought": decision.thought,
+                "actions": [self._action_label(a) for a in decision.actions],
+                "objective_reached": decision.objective_reached,
+            }
+            result.trace.append(entry)
 
             if decision.objective_reached:
-                log.info("Objective reached: %s", decision.objective_result)
+                log.info("│ 🏁 objectif atteint: %s", decision.objective_result[:200])
+                log.info("└────────────────────────────────────────")
                 result.success = True
                 result.result = decision.objective_result
                 break
 
             if not decision.actions:
-                log.warning("No actions in decision, skipping turn")
+                log.warning("│ ⚠️  aucune action proposée, tour ignoré")
+                log.info("└────────────────────────────────────────")
                 continue
 
             # 4. Execute actions
             for action in decision.actions:
                 await self._execute_action(action)
+            log.info("└────────────────────────────────────────")
 
         else:
             result.error = "max turns reached"
 
         self._running = False
-        log.info(
-            "Loop done: success=%s turns=%d tokens=%d/%d",
-            result.success,
-            result.turns,
-            result.total_input_tokens,
-            result.total_output_tokens,
-        )
+        log.info("✅ IA terminée: succès=%s tours=%d tokens=%d/%d",
+                 result.success, result.turns,
+                 result.total_input_tokens, result.total_output_tokens)
         return result
+
+    @staticmethod
+    def _action_label(action: dict) -> str:
+        t = action.get("type", "")
+        sel = action.get("selector", "")
+        val = action.get("value", "")
+        label = f"{t} {sel}".strip()
+        if val:
+            label += f" = {val}"
+        return label
 
     def stop(self):
         self._running = False
@@ -237,7 +256,7 @@ class ReasoningLoop:
                 label = f"UNKNOWN:{action_type}"
 
             self.action_history.append(f"{label} [OK]")
-            log.info("Action OK: %s", label)
+            log.info("│ 👉 action: %s ✓", label)
         except Exception as e:
             self.action_history.append(f"{label} [FAIL: {e}]")
-            log.warning("Action FAIL: %s -> %s", label, e)
+            log.warning("│ 👉 action: %s ✗ (%s)", label, e)

@@ -75,6 +75,7 @@ async def run_browser_flow(
     result.turns = loop_result.turns
     result.input_tokens = loop_result.total_input_tokens
     result.output_tokens = loop_result.total_output_tokens
+    result.trace = loop_result.trace
 
     # 5. Capture plaintext payload from the crypto hook.
     plaintexts = await browser.get_captured_plaintexts()
