@@ -13,10 +13,14 @@ from core import classifier
 
 log = logging.getLogger("ai_browser2")
 
-DIGIKUNTZ_BASE = "https://app.digikuntz.com/dev"
-DIGIKUNTZ_USER_ID = "USERID-REDACTED"
-DIGIKUNTZ_SECRET = "SK-REDACTED"
-DEFAULT_CALLBACK = "https://app.digikuntz.com/callback"
+# Config loaded from central settings (.env).
+from core.config import settings
+
+_dk = settings.digikuntz
+DIGIKUNTZ_BASE = _dk.base
+DIGIKUNTZ_USER_ID = _dk.user_id
+DIGIKUNTZ_SECRET = _dk.secret
+DEFAULT_CALLBACK = _dk.callback_url
 
 
 @dataclass

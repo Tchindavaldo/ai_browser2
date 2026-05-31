@@ -154,17 +154,21 @@ def interpret_ping(ping_data: dict, network: str) -> tuple[str, str] | None:
 
     return None
 
-# digiKUNTZ config
-DIGIKUNTZ_BASE = "https://app.digikuntz.com/dev"
-DIGIKUNTZ_USER_ID = "USERID-REDACTED"
-DIGIKUNTZ_SECRET = "SK-REDACTED"
+# digiKUNTZ + Flutterwave config — loaded from central settings (.env).
+# These are DEFAULTS for replay; a DB template overrides the Flutterwave
+# endpoints/key when present.
+from core.config import settings
 
-# Flutterwave config (from captured data)
-FLW_PUB_KEY = "FLWPUBK-REDACTED"
-FLW_CHARGE_URL = "https://api.ravepay.co/flwv3-pug/getpaidx/api/charge?use_polling=1"
-FLW_VERIFY_URL = "https://api.ravepay.co/flwv3-pug/getpaidx/api/verify/mpesa"
-FLW_INIT_URL = "https://api.ravepay.co/v3/checkout/initialize"
-FLW_UPGRADE_URL = "https://api.ravepay.co/v2/checkout/upgrade"
+_dk = settings.digikuntz
+DIGIKUNTZ_BASE = _dk.base
+DIGIKUNTZ_USER_ID = _dk.user_id
+DIGIKUNTZ_SECRET = _dk.secret
+
+FLW_PUB_KEY = _dk.flw_pub_key
+FLW_CHARGE_URL = _dk.flw_charge_url
+FLW_VERIFY_URL = _dk.flw_verify_url
+FLW_INIT_URL = _dk.flw_init_url
+FLW_UPGRADE_URL = _dk.flw_upgrade_url
 
 HEADERS = {
     "content-type": "application/json",

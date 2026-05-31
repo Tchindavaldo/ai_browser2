@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from core.browser import BrowserController
+from core.config import settings
 from core.llm_client import LlmClient, LlmConfig
 from aggregators.digikuntz.browser_flow import DigikuntzAgent, PaymentRequest, PaymentResult
 
@@ -30,15 +31,15 @@ async def lifespan(app: FastAPI):
     global browser, llm
 
     # Start browser (visible by default so you can watch!)
-    headless = os.environ.get("HEADLESS", "0") == "1"
+    headless = settings.headless
     browser = BrowserController(headless=headless)
     await browser.start()
 
     # Init LLM client
     llm = LlmClient(LlmConfig(
         provider="deepseek",
-        model=os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        model=settings.llm_model,
+        api_key=settings.deepseek_api_key,
     ))
 
     log.info("AI Browser 2 ready! Browser=%s, Model=%s",
