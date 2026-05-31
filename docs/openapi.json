@@ -1,0 +1,581 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MobileWallet backend",
+    "description": "\nBackend **MobileWallet** — un rassemblement d'**agrégateurs** de paiement Mobile Money.\n\nChaque agrégateur (DigiKUNTZ aujourd'hui, d'autres demain) est un module exposant\ndeux capacités :\n\n- **navigateur IA** (`mode=browser`) : un agent Playwright + LLM pilote le checkout,\n  exécute le paiement et **déduit** le « curl replay » (requête `/charge` + `/verify`),\n  persisté comme *template* réutilisable.\n- **curl replay** (`mode=replay`) : rejoue le paiement sans navigateur via le template stocké.\n- **auto** (`mode=auto`, défaut) : tente le replay d'abord, puis bascule sur le navigateur\n  si le replay est non concluant (`fallback_browser`).\n\nToute tentative est auditée (table `transactions`) quand Supabase est configuré.\n",
+    "version": "0.2"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Santé du service",
+        "description": "Statut du service + liste des agrégateurs enregistrés.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/aggregators": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Agrégateurs disponibles",
+        "description": "Liste les agrégateurs et, pour chacun, les réseaux exacts acceptés.",
+        "operationId": "list_aggregators_aggregators_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pay": {
+      "post": {
+        "tags": [
+          "payments"
+        ],
+        "summary": "Exécuter un paiement",
+        "description": "Exécute un paiement via l'agrégateur et le mode demandés.\n\n- **auto** (défaut) : replay d'abord ; bascule navigateur si non concluant\n  (selon `fallback_browser`).\n- **browser** : flux IA complet ; déduit et persiste le template curl.\n- **replay** : rejoue via le template stocké (409 si absent).",
+        "operationId": "pay_pay_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agrégateur inconnu."
+          },
+          "400": {
+            "description": "Mode invalide."
+          },
+          "422": {
+            "description": "Réseau non supporté (renvoie la liste exacte attendue)."
+          },
+          "409": {
+            "description": "Mode replay sans template (lancer mode=browser d'abord)."
+          },
+          "502": {
+            "description": "Replay échoué et fallback navigateur désactivé."
+          }
+        }
+      }
+    },
+    "/transactions": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Historique des transactions",
+        "description": "Dernières transactions auditées (vide si Supabase non configuré).\n\nFiltre optionnel par `aggregator`.",
+        "operationId": "list_transactions_transactions_get",
+        "parameters": [
+          {
+            "name": "aggregator",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Aggregator"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status/{transaction_ref}": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Statut d'une transaction",
+        "description": "Récupère une transaction stockée par sa référence.",
+        "operationId": "transaction_status_status__transaction_ref__get",
+        "parameters": [
+          {
+            "name": "transaction_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Transaction Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Aucune transaction pour cette référence."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive": {
+      "post": {
+        "tags": [
+          "dev"
+        ],
+        "summary": "Pilotage libre du navigateur (dev)",
+        "description": "Drive the browser to a URL and let the AI agent handle it.",
+        "operationId": "drive_drive_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/test-llm": {
+      "post": {
+        "tags": [
+          "dev"
+        ],
+        "summary": "Ping du LLM (dev)",
+        "description": "Quick test: send a simple prompt to DeepSeek and return the response.",
+        "operationId": "test_llm_test_llm_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DriveRequest": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "objective": {
+            "type": "string",
+            "title": "Objective"
+          },
+          "phone": {
+            "type": "string",
+            "title": "Phone",
+            "default": ""
+          },
+          "network": {
+            "type": "string",
+            "title": "Network",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "url",
+          "objective"
+        ],
+        "title": "DriveRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "PayRequest": {
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "title": "Amount",
+            "description": "Montant en XAF.",
+            "examples": [
+              25
+            ]
+          },
+          "phone": {
+            "type": "string",
+            "title": "Phone",
+            "description": "Numéro Mobile Money (sans +237).",
+            "examples": [
+              "696080087"
+            ]
+          },
+          "network": {
+            "type": "string",
+            "title": "Network",
+            "description": "Réseau : Orangemoney ou MTN.",
+            "examples": [
+              "Orangemoney"
+            ]
+          },
+          "email": {
+            "type": "string",
+            "title": "Email",
+            "description": "Email du payeur.",
+            "examples": [
+              "client@example.com"
+            ]
+          },
+          "sender_name": {
+            "type": "string",
+            "title": "Sender Name",
+            "description": "Nom affiché de l'émetteur.",
+            "default": "Rauvalia"
+          },
+          "callback_url": {
+            "type": "string",
+            "title": "Callback Url",
+            "description": "URL de callback (défaut: celle de l'agrégateur).",
+            "default": ""
+          },
+          "aggregator": {
+            "type": "string",
+            "title": "Aggregator",
+            "description": "Nom de l'agrégateur (cf. GET /aggregators).",
+            "default": "digikuntz"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode",
+            "description": "auto | browser | replay.",
+            "default": "auto",
+            "examples": [
+              "auto"
+            ]
+          },
+          "fallback_browser": {
+            "type": "boolean",
+            "title": "Fallback Browser",
+            "description": "En mode auto : basculer sur le navigateur si le replay est non concluant.",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "amount",
+          "phone",
+          "network",
+          "email"
+        ],
+        "title": "PayRequest",
+        "examples": [
+          {
+            "aggregator": "digikuntz",
+            "amount": 25,
+            "email": "client@example.com",
+            "fallback_browser": true,
+            "mode": "auto",
+            "network": "Orangemoney",
+            "phone": "696080087"
+          }
+        ]
+      },
+      "PayResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "description": "Vrai si le paiement a abouti."
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Message clair pour l'utilisateur (succès comme échec).",
+            "default": ""
+          },
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "description": "Message d'erreur technique éventuel.",
+            "default": ""
+          },
+          "transaction_id": {
+            "type": "string",
+            "title": "Transaction Id",
+            "description": "Référence transaction de l'agrégateur.",
+            "default": ""
+          },
+          "payment_status": {
+            "type": "string",
+            "title": "Payment Status",
+            "default": ""
+          },
+          "turns": {
+            "type": "integer",
+            "title": "Turns",
+            "description": "Nombre de tours de l'agent IA (mode browser).",
+            "default": 0
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens",
+            "default": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens",
+            "default": 0
+          },
+          "flutterwave_charge_url": {
+            "type": "string",
+            "title": "Flutterwave Charge Url",
+            "default": ""
+          },
+          "flutterwave_charge_body": {
+            "type": "string",
+            "title": "Flutterwave Charge Body",
+            "default": ""
+          },
+          "flutterwave_charge_response": {
+            "type": "string",
+            "title": "Flutterwave Charge Response",
+            "default": ""
+          },
+          "curl_replay": {
+            "type": "string",
+            "title": "Curl Replay",
+            "description": "Commande curl reproductible déduite.",
+            "default": ""
+          },
+          "plaintext_payload": {
+            "type": "string",
+            "title": "Plaintext Payload",
+            "default": ""
+          },
+          "public_key": {
+            "type": "string",
+            "title": "Public Key",
+            "default": ""
+          },
+          "verify_url": {
+            "type": "string",
+            "title": "Verify Url",
+            "default": ""
+          },
+          "verify_request_body": {
+            "type": "string",
+            "title": "Verify Request Body",
+            "default": ""
+          },
+          "verify_last_response": {
+            "type": "string",
+            "title": "Verify Last Response",
+            "default": ""
+          },
+          "verify_curl": {
+            "type": "string",
+            "title": "Verify Curl",
+            "default": ""
+          },
+          "final_status": {
+            "type": "string",
+            "title": "Final Status",
+            "description": "successful | failed | cancelled | pending | unknown.",
+            "default": ""
+          },
+          "final_message": {
+            "type": "string",
+            "title": "Final Message",
+            "description": "Message clair pour l'utilisateur final.",
+            "default": ""
+          },
+          "error_signals": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Error Signals",
+            "default": {}
+          },
+          "captured_requests": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Captured Requests",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "success"
+        ],
+        "title": "PayResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "Santé et introspection du service."
+    },
+    {
+      "name": "payments",
+      "description": "Exécution des paiements via les agrégateurs."
+    },
+    {
+      "name": "transactions",
+      "description": "Historique et statut des transactions (Supabase)."
+    },
+    {
+      "name": "dev",
+      "description": "Outils de développement (pilotage libre, ping LLM)."
+    }
+  ]
+}

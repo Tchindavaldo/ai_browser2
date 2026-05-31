@@ -122,6 +122,7 @@ class PayRequest(BaseModel):
 
 class PayResponse(BaseModel):
     success: bool = Field(..., description="Vrai si le paiement a abouti.")
+    message: str = Field("", description="Message clair pour l'utilisateur (succès comme échec).")
     error: str = Field("", description="Message d'erreur technique éventuel.")
     transaction_id: str = Field("", description="Référence transaction de l'agrégateur.")
     payment_status: str = ""
@@ -306,6 +307,7 @@ async def pay(req: PayRequest):
 
     return PayResponse(
         success=result.success,
+        message=result.final_message or result.error,
         error=result.error,
         transaction_id=result.transaction_id,
         payment_status=result.payment_status,
