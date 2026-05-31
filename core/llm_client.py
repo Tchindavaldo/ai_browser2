@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -48,7 +49,7 @@ class LlmClient:
         self,
         system_prompt: str,
         user_content: list[dict],
-        on_token: callable | None = None,
+        on_token: Callable | None = None,
     ) -> LlmResponse:
         """Send a message and stream the response.
 

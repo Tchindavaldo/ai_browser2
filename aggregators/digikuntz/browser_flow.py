@@ -6,10 +6,10 @@ from dataclasses import dataclass
 
 import httpx
 
-from agent.browser import BrowserController
-from agent.llm_client import LlmClient
-from agent.reasoning_loop import ReasoningLoop
-from agent import classifier
+from core.browser import BrowserController
+from core.llm_client import LlmClient
+from core.reasoning_loop import ReasoningLoop
+from core import classifier
 
 log = logging.getLogger("ai_browser2")
 

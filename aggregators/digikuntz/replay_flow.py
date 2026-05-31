@@ -305,9 +305,10 @@ async def step3_charge(
         "phonenumber": phone,
     }, separators=(",", ":"))
 
-    # Encrypt with REAL cryptico.js via Node.js — identical to browser
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    encrypt_js = os.path.join(script_dir, "encrypt.js")
+    # Encrypt with REAL cryptico.js via Node.js — identical to browser.
+    # encrypt.js lives in core/crypto/ (repo root is two levels up from this module).
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    encrypt_js = os.path.join(repo_root, "core", "crypto", "encrypt.js")
     proc = subprocess.run(
         ["node", encrypt_js, plaintext, public_key_rsa],
         capture_output=True, text=True, timeout=15,
