@@ -133,7 +133,9 @@ curl -X POST localhost:7332/pay -H 'content-type: application/json' -d '{
 
 Créer les tables via `schema/supabase.sql` puis renseigner `SUPABASE_URL`/`SUPABASE_KEY`.
 
-- `transactions` — audit d'une tentative (aggregator, mode, montant, statut, message…).
+- `transactions` — audit d'une tentative. Insérée en **`pending`** dès le départ, puis
+  **mise à jour** (`status`/`success`/`message`) au verdict final. Un paiement ne peut pas
+  être lancé sur un numéro qui a déjà une transaction `pending` (→ **409 `pending_exists`**).
 - `curl_templates` — template de replay réutilisable, **un par agrégateur** (déduit en
   mode browser, rechargé en mode replay).
 

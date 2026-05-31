@@ -22,6 +22,11 @@ create table if not exists transactions (
 create index if not exists transactions_ref_idx on transactions (transaction_ref);
 create index if not exists transactions_created_idx on transactions (created_at desc);
 
+-- Fast lookup for the "one pending payment per number" guard.
+create index if not exists transactions_pending_idx
+    on transactions (aggregator, phone)
+    where status = 'pending';
+
 -- Reusable per-aggregator curl-replay template, deduced by the browser mode.
 create table if not exists curl_templates (
     id          bigint generated always as identity primary key,

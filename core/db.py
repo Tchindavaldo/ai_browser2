@@ -41,9 +41,37 @@ class Database:
         return self._client is not None
 
     # --- transactions audit ---
-    async def save_transaction(
-        self, aggregator: str, mode: str, req: PaymentRequest, result: PaymentResult
-    ) -> dict | None:
+    async def has_pending(self, aggregator: str, phone: str) -> bool:
+        """True if a transaction for (aggregator, phone) is still 'pending'.
+
+        Used to block launching a new payment on a number that already has one
+        in flight. Safe (False) if Supabase is disabled.
+        """
+        if not self.enabled:
+            return False
+
+        def _select():
+            res = (
+                self._client.table("transactions")
+                .select("id")
+                .eq("aggregator", aggregator)
+                .eq("phone", phone)
+                .eq("status", "pending")
+                .limit(1)
+                .execute()
+            )
+            return bool(res.data)
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("has_pending failed: %s", e)
+            return False
+
+    async def insert_pending(
+        self, aggregator: str, mode: str, req: PaymentRequest
+    ) -> int | None:
+        """Insert the transaction as 'pending' at the start; return its id."""
         if not self.enabled:
             return None
         row = {
@@ -53,24 +81,40 @@ class Database:
             "phone": req.phone,
             "network": req.network,
             "email": req.email,
+            "status": "pending",
+            "success": False,
+        }
+
+        def _insert():
+            res = self._client.table("transactions").insert(row).execute()
+            return res.data[0]["id"] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_insert)
+        except Exception as e:  # noqa: BLE001
+            log.warning("insert_pending failed: %s", e)
+            return None
+
+    async def update_transaction(self, tx_id: int, result: PaymentResult) -> None:
+        """Update a pending row with the final verdict once the payment settles."""
+        if not self.enabled or tx_id is None:
+            return
+        patch = {
             "transaction_ref": result.transaction_id,
-            "status": result.final_status or result.payment_status,
+            "status": result.final_status or result.payment_status or "unknown",
             "message": result.final_message,
             "success": result.success,
             "charge_response": result.flutterwave_charge_response[:5000],
             "error_signals": result.error_signals,
         }
 
-        def _insert():
-            res = self._client.table("transactions").insert(row).execute()
-            return res.data[0] if res.data else None
+        def _update():
+            self._client.table("transactions").update(patch).eq("id", tx_id).execute()
 
         try:
-            # supabase-py is synchronous -> run off the event loop.
-            return await asyncio.to_thread(_insert)
+            await asyncio.to_thread(_update)
         except Exception as e:  # noqa: BLE001
-            log.warning("save_transaction failed: %s", e)
-            return None
+            log.warning("update_transaction failed: %s", e)
 
     async def list_transactions(self, aggregator: str | None = None, limit: int = 50) -> list[dict]:
         if not self.enabled:

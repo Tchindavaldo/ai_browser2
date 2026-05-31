@@ -230,6 +230,18 @@ async def pay(req: PayRequest):
         callback_url=req.callback_url,
     )
 
+    # Refuse a new payment on a number that already has one in flight.
+    if await db.has_pending(req.aggregator, req.phone):
+        raise HTTPException(
+            409,
+            {
+                "error": "pending_exists",
+                "message": f"Une transaction est déjà en cours (pending) sur le numéro {req.phone}.",
+                "aggregator": req.aggregator,
+                "phone": req.phone,
+            },
+        )
+
     async def _run_browser_and_save():
         """Browser flow + deduce/persist the curl template from the capture."""
         res = await agg.pay_via_browser(payment)
@@ -243,6 +255,9 @@ async def pay(req: PayRequest):
                 await db.save_template(req.aggregator, template)
         return res
 
+    # Resolve the template / 409 paths BEFORE creating the pending row, so a
+    # rejected request never leaves a dangling 'pending' transaction.
+    template = None
     if req.mode == "replay":
         template = await db.load_template(req.aggregator)
         if template is None:
@@ -250,33 +265,44 @@ async def pay(req: PayRequest):
                 409,
                 f"No stored curl template for '{req.aggregator}'. Run mode='browser' once to deduce it.",
             )
-        result = await agg.replay(payment, template)
-    elif req.mode == "browser":
-        result = await _run_browser_and_save()
-    else:  # auto: replay first, fall back to browser if inconclusive
+    elif req.mode == "auto":
         template = await db.load_template(req.aggregator)
-        if template is not None:
-            try:
-                result = await agg.replay(payment, template)
-            except Exception as e:  # noqa: BLE001
-                log.warning("auto: replay raised (%s)", e)
-                result = None
-            inconclusive = result is None or result.final_status in ("unknown", "timeout", "error", "")
-            if inconclusive and req.fallback_browser:
-                log.info("auto: replay inconclusive -> falling back to browser")
-                result = await _run_browser_and_save()
-            elif result is None:
-                raise HTTPException(502, "Replay failed and browser fallback disabled (fallback_browser=false)")
-        else:
-            if not req.fallback_browser:
-                raise HTTPException(
-                    409,
-                    f"No template for '{req.aggregator}' and fallback_browser=false. Run mode='browser' first.",
-                )
-            result = await _run_browser_and_save()
+        if template is None and not req.fallback_browser:
+            raise HTTPException(
+                409,
+                f"No template for '{req.aggregator}' and fallback_browser=false. Run mode='browser' first.",
+            )
 
-    # Audit the attempt (no-op if Supabase unconfigured).
-    await db.save_transaction(req.aggregator, req.mode, payment, result)
+    # Insert the audit row as 'pending' now; update it with the verdict at the end.
+    tx_id = await db.insert_pending(req.aggregator, req.mode, payment)
+    result = None
+    try:
+        if req.mode == "replay":
+            result = await agg.replay(payment, template)
+        elif req.mode == "browser":
+            result = await _run_browser_and_save()
+        else:  # auto: replay first, fall back to browser if inconclusive
+            if template is not None:
+                try:
+                    result = await agg.replay(payment, template)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("auto: replay raised (%s)", e)
+                    result = None
+                inconclusive = result is None or result.final_status in ("unknown", "timeout", "error", "")
+                if inconclusive and req.fallback_browser:
+                    log.info("auto: replay inconclusive -> falling back to browser")
+                    result = await _run_browser_and_save()
+                elif result is None:
+                    raise HTTPException(502, "Replay failed and browser fallback disabled (fallback_browser=false)")
+            else:
+                result = await _run_browser_and_save()
+    finally:
+        # Always settle the pending row so it never stays stuck 'pending'.
+        if result is None:
+            result = PaymentResult()
+            result.final_status = "error"
+            result.final_message = "Paiement interrompu (erreur serveur)."
+        await db.update_transaction(tx_id, result)
 
     return PayResponse(
         success=result.success,
