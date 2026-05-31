@@ -126,19 +126,6 @@ class ReasoningLoop:
                 result.trace.append({"turn": n, "error": f"snapshot failed: {e}"})
                 break
 
-            # 1b. Redirect guard — if the page left the checkout, stop immediately.
-            if self.checkout_url_predicate and not self.checkout_url_predicate(snap.url):
-                log.info("│ 🔀 redirection détectée hors checkout: %s", snap.url)
-                result.trace.append({
-                    "turn": n, "url": snap.url, "elements": len(snap.interactive_elements),
-                    "thought": f"Redirection hors checkout détectée: {snap.url}",
-                    "actions": [], "objective_reached": True,
-                })
-                result.success = True
-                result.result = f'{{"status":"redirected","final_url":"{snap.url}","message":"Redirection hors checkout"}}'
-                log.info("└────────────────────────────────────────")
-                break
-
             # 2. Build prompt and send to LLM
             user_content = self._build_user_content(snap, objective, turn)
             llm_resp = await self.llm.send(SYSTEM_PROMPT, user_content)

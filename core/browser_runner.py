@@ -102,7 +102,10 @@ async def run_browser_flow(
 
     # 4. Run the reasoning loop on the aggregator's objective.
     browser.reset_diagnostics()
-    loop = ReasoningLoop(browser, llm, max_turns=max_turns)
+    loop = ReasoningLoop(
+        browser, llm, max_turns=max_turns,
+        checkout_url_predicate=aggregator.checkout_url_predicate,
+    )
     loop_result = await loop.run(aggregator.browser_objective(req))
     result.turns = loop_result.turns
     result.input_tokens = loop_result.total_input_tokens

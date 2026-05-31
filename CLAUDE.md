@@ -17,6 +17,24 @@ Règle: **tout travail de debug commence sur une branche `debug/`**, créée dep
 la branche de feature concernée (pas depuis `main`), pour hériter de son
 instrumentation. Ne jamais débuguer directement sur `main` ni sur une `feature/`.
 
+## Philosophie agent IA (OBLIGATOIRE)
+
+**L'IA a le contrôle total — rien n'est décidé en dur dans le code.**
+
+Le rôle du backend est de fournir à l'IA :
+- Un snapshot fidèle de ce qu'elle voit (DOM, URL, éléments)
+- Les outils pour agir (click, fill, select, reload, wait)
+- Un objectif clair en langage naturel
+
+**Ce que le code ne doit JAMAIS faire :**
+- Décider à la place de l'IA qu'un paiement a réussi ou échoué
+- Interrompre la boucle parce qu'une URL a changé (c'est à l'IA de voir et décider)
+- Interpréter un résultat avant que l'IA l'ait lu à l'écran
+- Forcer `objective_reached=true` ou `success=True` depuis le code
+
+Si la page redirige, l'IA le voit dans le snapshot (URL + contenu) et conclut
+elle-même. Le code fournit l'information, l'IA juge.
+
 ## Tests live (réseau)
 
 Les appels réels (DigiKUNTZ, Flutterwave) doivent être lancés **depuis la machine
