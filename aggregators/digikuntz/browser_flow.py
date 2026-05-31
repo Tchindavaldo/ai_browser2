@@ -42,13 +42,19 @@ class DigikuntzAgent:
             f"5. Attends 5 secondes et lis le resultat\n\n"
             f"IMPORTANT:\n"
             f"- Si le bouton Pay est disabled, c'est que le reseau n'est pas selectionne. Selectionne-le d'abord.\n"
+            f"- COMMENT SAVOIR SI LE FORMULAIRE VA APPARAITRE: regarde les DERNIERES "
+            f"REPONSES HTTP dans ton snapshot. Si tu vois 'v3/checkout/initialize' [200], "
+            f"cela signifie que Vue.js a fini son initialisation et que le formulaire va "
+            f"apparaitre dans les secondes qui suivent — attends 3-5s, ne recharge pas. "
+            f"Si tu vois des scripts encore en cours (chunk-vendors.js, app.js dans "
+            f"REQUETES EN COURS), attends qu'ils finissent avant de conclure que c'est bloque.\n"
             f"- ERREURS DE CHARGEMENT = RECUPERABLES, JAMAIS un echec final: si tu vois "
             f"'Impossible de recuperer les reseaux', un loader bloque, un select reseau "
-            f"vide, ou une erreur reseau AVANT d'avoir clique Payer, tu n'as PAS encore "
-            f"paye. Tu dois trouver une solution toi-meme pour pouvoir payer:\n"
+            f"vide, ou une erreur reseau AVANT d'avoir clique Payer, ET qu'il n'y a plus "
+            f"de requetes en cours, tu n'as PAS encore paye. Solutions:\n"
             f"    a) attends quelques secondes (action wait) puis reverifie le select reseau,\n"
-            f"    b) si toujours vide/en erreur, recharge la page de paiement (action "
-            f"\"reload\") pour relancer le checkout, puis recommence depuis l'etape 1,\n"
+            f"    b) si toujours vide/en erreur apres attente ET aucune requete en cours, "
+            f"recharge la page de paiement (action \"reload\"), puis recommence depuis l'etape 1,\n"
             f"    c) repete (attendre / recharger) 2 a 3 fois MAXIMUM. Si apres 3 reloads le "
             f"formulaire ne s'affiche toujours pas (0 elements interactifs, loader en boucle), "
             f"ARRETE et conclus: objective_reached=true avec objective_result "
@@ -152,14 +158,22 @@ class DigikuntzAgent:
         charge_body = charge_req.response_body if charge_req else ""
         signals_text = json.dumps(error_signals, ensure_ascii=False) if has_error_signal else ""
 
+        # Si l'IA a déjà conclu avec un statut définitif (elle a vu payment-done,
+        # un message d'echec/succes clair), on respecte sa conclusion sans entrer
+        # dans le watch USSD — l'IA a la vision complète, le code ne la contourne pas.
+        agent_concluded = agent_status in ("error", "failed", "success", "cancelled")
+        if agent_concluded:
+            log.info("Agent a conclu status=%s — skip USSD watch", agent_status)
+
         # USSD can also be inferred from the /charge response body (e.g. "dial").
-        if not ussd_detected:
+        # Mais seulement si l'IA n'a pas déjà conclu définitivement.
+        if not ussd_detected and not agent_concluded:
             cb_hit = classifier.classify(charge_body)
             if cb_hit and cb_hit[0] == "ussd_sent":
                 ussd_detected = True
                 log.info("USSD inferred from charge response (%r)", cb_hit[1])
 
-        if ussd_detected:
+        if ussd_detected and not agent_concluded:
             log.info("USSD sent! Watching for page change (react on change, no fixed wait)...")
             await self.browser.watch_page_changes()
             for i in range(60):  # safety cap 60s, but we break the instant anything changes
@@ -223,8 +237,11 @@ class DigikuntzAgent:
                 status, kw, src = decided
                 log.info("Keyword %r matched -> %s", kw, status)
                 result.final_status = status
+                # Use the authoritative source text (the one that matched the
+                # keyword) as context for _friendly, NOT agent_message which
+                # may be a generic "loader error" unrelated to the real cause.
                 result.final_message = self._friendly(
-                    status, req.network, (agent_message or src)[:300]
+                    status, req.network, src[:300]
                 )
             else:
                 # Nothing matched any known keyword -> ask the LLM on the

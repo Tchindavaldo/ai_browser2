@@ -103,7 +103,10 @@ class ReasoningLoop:
 
     async def run(self, objective: str) -> LoopResult:
         """Execute the reasoning loop until objective reached or max turns."""
+        import time as _time
         self._running = True
+        self._started_at = _time.time()
+        self._url_history: list[str] = []
         result = LoopResult()
 
         for turn in range(self.max_turns):
@@ -118,6 +121,11 @@ class ReasoningLoop:
             # 1. Snapshot
             try:
                 snap = await self.browser.snapshot()
+                # Inject loop-level context the browser doesn't know about
+                snap.elapsed_s = round(_time.time() - self._started_at, 1)
+                if not self._url_history or self._url_history[-1] != snap.url:
+                    self._url_history.append(snap.url)
+                snap.url_history = list(self._url_history)
                 log.info("│ 👁  vu: %d éléments interactifs | url=%s",
                          len(snap.interactive_elements), snap.url)
             except Exception as e:
@@ -216,13 +224,46 @@ class ReasoningLoop:
         elements_json = json.dumps(snap.interactive_elements, ensure_ascii=False)
         history_str = "\n".join(f"- {a}" for a in self.action_history) or "(aucune)"
 
+        # Réseau — vision complète DevTools (uniquement si non vide)
+        network_lines = []
+        if snap.pending_requests:
+            network_lines.append("REQUETES EN COURS (pas encore terminees):")
+            for r in snap.pending_requests:
+                network_lines.append(f"  [{r['age_s']}s] {r['type']} ...{r['url']}")
+        if snap.recent_responses:
+            network_lines.append("DERNIERES REPONSES HTTP:")
+            for r in snap.recent_responses:
+                line = f"  {r['method']} {r['status']} ...{r['url']}"
+                if r.get("body"):
+                    line += f"\n    body: {r['body']}"
+                network_lines.append(line)
+        if snap.failed_requests:
+            network_lines.append("REQUETES ECHOUEES:")
+            for r in snap.failed_requests:
+                network_lines.append(f"  {r['method']} {r['error']} ...{r['url']}")
+        if snap.console_errors:
+            network_lines.append("ERREURS CONSOLE:")
+            for e in snap.console_errors:
+                network_lines.append(f"  {e}")
+        network_section = ("\n" + "\n".join(network_lines) + "\n") if network_lines else ""
+
+        # Historique d'URLs (uniquement si navigation multiple)
+        url_history_str = ""
+        if len(snap.url_history) > 1:
+            url_history_str = "\nHISTORIQUE URLS: " + " → ".join(snap.url_history) + "\n"
+
+        frame_info = (f" | iframe s'est détachée {snap.frame_detached_count}x"
+                      if snap.frame_detached_count > 0 else "")
         text = (
-            f"TOUR #{turn}\n\n"
+            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}\n\n"
             f"OBJECTIF: {objective}\n\n"
-            f"URL ACTUELLE: {snap.url}\n\n"
+            f"URL ACTUELLE: {snap.url}"
+            f"{url_history_str}"
+            f"{network_section}\n"
             f"ELEMENTS INTERACTIFS (JSON):\n{elements_json}\n\n"
             f"HISTORIQUE D'ACTIONS:\n{history_str}\n\n"
-            f"DOM (outerHTML, peut etre tronque):\n{snap.outer_html}\n\n"
+            f"DOM PAGE PRINCIPALE:\n{snap.page_outer_html}\n\n"
+            f"DOM FRAME ACTIF (iframe si dedans):\n{snap.outer_html}\n\n"
             f"Reponds maintenant en JSON pur selon le schema."
         )
         content.append({"type": "text", "text": text})
