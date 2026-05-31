@@ -17,8 +17,10 @@ After any change to `core/server.py` that affects the API surface:
 - a new aggregator that changes `supported_networks` exposed by `/aggregators`
 
 ## How to run
+Always use the project venv (its FastAPI/Pydantic versions define the schema; the
+global `python` may differ and produce a spurious diff):
 ```bash
-python scripts/dump_openapi.py
+venv/bin/python scripts/dump_openapi.py
 ```
 This imports the app (no browser/LLM started — `app.openapi()` only reads metadata)
 and writes `docs/openapi.json`.
