@@ -350,6 +350,40 @@ async def step3_charge(
                 continue
             print(f"    charge status: {resp.status_code} (tentative {attempt})")
             print(f"    response: {json.dumps(result, indent=2)[:500]}")
+
+            # "demande longue" — poll ping_url until we get the real charge result.
+            ping_url = (result.get("data") or {}).get("ping_url", "")
+            if ping_url and result.get("status") == "success":
+                print(f"\n[3b] Polling ping_url for charge result...")
+                async with httpx.AsyncClient(timeout=30) as ping_client:
+                    for i in range(20):
+                        await asyncio.sleep(3)
+                        try:
+                            pr = await ping_client.get(ping_url, headers=HEADERS)
+                            ping_data = pr.json()
+                        except Exception:
+                            continue
+                        print(f"    ping {i+1}: {json.dumps(ping_data)[:200]}")
+                        inner = ping_data.get("data", {})
+                        if isinstance(inner, dict):
+                            resp_obj = inner.get("response_parsed")
+                            if not isinstance(resp_obj, dict):
+                                resp_str = inner.get("response", "")
+                                if isinstance(resp_str, str) and resp_str.startswith("{"):
+                                    try:
+                                        resp_obj = json.loads(resp_str)
+                                    except json.JSONDecodeError:
+                                        resp_obj = {}
+                            if isinstance(resp_obj, dict):
+                                nested = resp_obj.get("data", {})
+                                if isinstance(nested, dict) and (nested.get("flw_reference") or nested.get("flwRef")):
+                                    print(f"    Got real charge response from ping_url")
+                                    result = resp_obj
+                                    break
+                        if ping_data.get("status") == "error":
+                            result = ping_data
+                            break
+
             return {"modalauditid": modalauditid, "charge_response": result}
 
     # Les 3 tentatives ont échoué.
