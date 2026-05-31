@@ -90,10 +90,14 @@ class ReasoningLoop:
         browser: BrowserController,
         llm: LlmClient,
         max_turns: int = 20,
+        checkout_url_predicate: "callable | None" = None,
     ):
         self.browser = browser
         self.llm = llm
         self.max_turns = max_turns
+        # Optional guard: if the URL leaves the checkout (predicate returns False),
+        # the loop stops immediately and records the redirect as the outcome.
+        self.checkout_url_predicate = checkout_url_predicate
         self.action_history: list[str] = []
         self._running = False
 
@@ -120,6 +124,19 @@ class ReasoningLoop:
                 log.error("│ ❌ snapshot échoué: %s", e)
                 result.error = f"snapshot failed: {e}"
                 result.trace.append({"turn": n, "error": f"snapshot failed: {e}"})
+                break
+
+            # 1b. Redirect guard — if the page left the checkout, stop immediately.
+            if self.checkout_url_predicate and not self.checkout_url_predicate(snap.url):
+                log.info("│ 🔀 redirection détectée hors checkout: %s", snap.url)
+                result.trace.append({
+                    "turn": n, "url": snap.url, "elements": len(snap.interactive_elements),
+                    "thought": f"Redirection hors checkout détectée: {snap.url}",
+                    "actions": [], "objective_reached": True,
+                })
+                result.success = True
+                result.result = f'{{"status":"redirected","final_url":"{snap.url}","message":"Redirection hors checkout"}}'
+                log.info("└────────────────────────────────────────")
                 break
 
             # 2. Build prompt and send to LLM
@@ -151,7 +168,7 @@ class ReasoningLoop:
             result.trace.append(entry)
 
             if decision.objective_reached:
-                log.info("│ 🏁 objectif atteint: %s", decision.objective_result[:200])
+                log.info("│ 🏁 objectif atteint: %s", str(decision.objective_result or "")[:200])
                 log.info("└────────────────────────────────────────")
                 result.success = True
                 result.result = decision.objective_result

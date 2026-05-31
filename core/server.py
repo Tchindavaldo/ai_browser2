@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 # Importing the aggregators package registers all aggregators in the registry.
 import aggregators.digikuntz  # noqa: F401
-from core.base import CurlTemplate, PaymentRequest
+from core.base import CurlTemplate, PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.config import settings
 from core.db import db
