@@ -325,39 +325,60 @@ async def step3_charge(
         "client": encrypted,
     }
 
+    # The /charge call can transiently fail (empty/non-JSON body on 502/504,
+    # ReadTimeout, connection reset). Retry up to 3 times before giving up.
+    max_attempts = 3
+    last_error = ""
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            FLW_CHARGE_URL,
-            json=charge_body,
-            headers=HEADERS,
-        )
-        try:
-            result = resp.json()
-        except json.JSONDecodeError:
-            # Flutterwave can return an empty/non-JSON body on a 502/504 or a
-            # transient gateway hiccup — don't crash, surface it as an error.
-            print(f"    charge status: {resp.status_code} (non-JSON body, {len(resp.content)} bytes)")
-            print(f"    raw response: {resp.text[:300]!r}")
-            return {"modalauditid": modalauditid, "charge_response": {
-                "status": "error",
-                "message": f"Réponse Flutterwave invalide (HTTP {resp.status_code}, corps vide). Réessayez.",
-            }}
-        print(f"    charge status: {resp.status_code}")
-        print(f"    response: {json.dumps(result, indent=2)[:500]}")
-        return {"modalauditid": modalauditid, "charge_response": result}
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await client.post(
+                    FLW_CHARGE_URL,
+                    json=charge_body,
+                    headers=HEADERS,
+                )
+                result = resp.json()
+            except (httpx.HTTPError, json.JSONDecodeError) as e:
+                last_error = f"{type(e).__name__}"
+                print(f"    charge tentative {attempt}/{max_attempts} échouée "
+                      f"({last_error}), réponse invalide/réseau instable...")
+                continue
+            print(f"    charge status: {resp.status_code} (tentative {attempt})")
+            print(f"    response: {json.dumps(result, indent=2)[:500]}")
+            return {"modalauditid": modalauditid, "charge_response": result}
+
+    # Les 3 tentatives ont échoué.
+    print(f"    ABANDON: charge échouée après {max_attempts} tentatives ({last_error})")
+    return {"modalauditid": modalauditid, "charge_response": {
+        "status": "error",
+        "message": f"Réponse Flutterwave invalide après {max_attempts} tentatives "
+                   f"({last_error}). Réessayez.",
+    }}
 
 
 async def step4_poll_verify(
-    modalauditid: str, flw_ref: str, timeout_s: int = 1800
+    modalauditid: str, flw_ref: str, timeout_s: int = 1020
 ) -> dict:
-    """Poll the verify endpoint until payment is confirmed or failed."""
-    print(f"[4] Polling verify (flw_ref={flw_ref})...")
+    """Poll the verify endpoint until payment is confirmed or failed.
+
+    Runs for at most ``timeout_s`` of REAL wall-clock time (default 1020s =
+    17 min — the observed delay before the operator auto-cancels an
+    unvalidated transaction, +1 min margin). A single network hiccup on one
+    poll (ReadTimeout, reset, non-JSON body) is ignored: we skip that tick and
+    keep polling until the budget is spent or a final verdict arrives.
+    """
+    print(f"[4] Polling verify (flw_ref={flw_ref})... (max {timeout_s}s)")
+
+    start = time.monotonic()
+    deadline = start + timeout_s
+    i = 0
+    got_any_status = False  # did we ever receive a parsable verify response?
+    last_status = None
 
     async with httpx.AsyncClient(timeout=30) as client:
-        for i in range(timeout_s // 3):
-            await asyncio.sleep(3)
-            # A single network hiccup (ReadTimeout, connection reset, non-JSON
-            # body) must NOT abort a 30-min poll — just skip this tick and retry.
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            i += 1
             try:
                 resp = await client.post(
                     FLW_VERIFY_URL,
@@ -370,11 +391,22 @@ async def step4_poll_verify(
                 )
                 data = resp.json()
             except (httpx.HTTPError, json.JSONDecodeError) as e:
-                print(f"    poll {i+1}: réseau instable ({type(e).__name__}), on réessaie...")
+                remaining = int(deadline - time.monotonic())
+                print(f"    poll {i}: réseau instable ({type(e).__name__}), "
+                      f"on continue ({remaining}s restantes)...")
                 continue
+
+            got_any_status = True
             status = data.get("data", {}).get("status", "pending")
             charge_code = data.get("data", {}).get("chargeResponseCode", "")
-            print(f"    poll {i+1}: status={status} code={charge_code}")
+            elapsed = int(time.monotonic() - start)
+            # Log every 10th poll, plus ALWAYS on a status change (the moment
+            # the operator decides) so we can pinpoint the exact delay.
+            if status != last_status or i % 10 == 0:
+                mark = "  <-- CHANGEMENT" if status != last_status and last_status is not None else ""
+                print(f"    poll {i} (t+{elapsed}s = {elapsed//60}min{elapsed%60:02d}): "
+                      f"status={status} code={charge_code}{mark}")
+                last_status = status
 
             # Parse the structured verify response directly.
             verdict = interpret_verify(data, "")
@@ -385,7 +417,14 @@ async def step4_poll_verify(
             if charge_code == "00":
                 return data
 
-    return {"status": "timeout", "message": "Verification timed out"}
+    # 17 min écoulées sans verdict final.
+    # TODO (todo/poll-fallback-digikuntz.md): si aucun statut reçu OU que des
+    # erreurs réseau, interroger l'API DigiKUNTZ pour le vrai statut.
+    return {
+        "status": "timeout",
+        "message": "Verification timed out",
+        "got_any_status": got_any_status,
+    }
 
 
 async def main():
@@ -505,12 +544,24 @@ async def main():
     verdict = interpret_verify(verify, network)
     if verdict:
         status, msg = verdict
+    elif verify.get("status") == "timeout":
+        # 17 min écoulées sans verdict final. Deux cas distincts :
+        #  A) on a reçu des statuts (toujours pending) → le délai opérateur est
+        #     dépassé, donc la transaction est annulée par l'opérateur.
+        #  B) on n'a eu QUE des erreurs réseau (Flutterwave injoignable) → on ne
+        #     sait rien : fallback API DigiKUNTZ (voir todo/poll-fallback-digikuntz.md).
+        if verify.get("got_any_status"):
+            status = "cancelled"
+            msg = ("Transaction annulée par l'opérateur "
+                   "(non validée dans le délai).")
+        else:
+            status = "unknown"
+            msg = ("Flutterwave injoignable pendant 17 min (que des erreurs "
+                   "réseau). Statut à confirmer via l'API DigiKUNTZ "
+                   "[TODO: todo/poll-fallback-digikuntz.md].")
     else:
         status = verify.get("data", {}).get("status", "unknown")
-        if status == "unknown":
-            msg = "Timeout — l'utilisateur n'a pas validé le USSD dans le délai."
-        else:
-            msg = f"Statut Flutterwave: {status}"
+        msg = f"Statut Flutterwave: {status}"
     print(f"\n=== RESULTAT: {status.upper()} ===")
     print(f"    {msg}")
     print(json.dumps(verify, indent=2)[:400])
