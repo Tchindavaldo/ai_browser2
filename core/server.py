@@ -355,6 +355,31 @@ async def transaction_status(transaction_ref: str):
     return tx
 
 
+@app.post(
+    "/transactions/{tx_id}/cancel",
+    tags=["transactions"],
+    summary="Débloquer une transaction pending",
+    responses={
+        404: {"description": "Aucune transaction 'pending' avec cet id."},
+        503: {"description": "Supabase non configuré."},
+    },
+)
+async def cancel_transaction(tx_id: int):
+    """Force une transaction restée **pending** à **cancelled**.
+
+    Sert à débloquer une transaction coincée (ex: serveur interrompu avant le
+    verdict) qui empêcherait un nouveau paiement sur le même numéro
+    (`409 pending_exists`). N'agit que sur une ligne encore `pending` — ne
+    réécrit jamais un verdict déjà acté.
+    """
+    if not db.enabled:
+        raise HTTPException(503, "Supabase non configuré.")
+    row = await db.cancel_pending(tx_id)
+    if row is None:
+        raise HTTPException(404, f"Aucune transaction 'pending' avec l'id {tx_id}.")
+    return {"cancelled": row}
+
+
 class TemplateBody(BaseModel):
     """Champs du curl template (tous optionnels — seuls ceux fournis sont posés)."""
     charge_url: str = ""

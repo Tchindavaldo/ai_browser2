@@ -116,6 +116,37 @@ class Database:
         except Exception as e:  # noqa: BLE001
             log.warning("update_transaction failed: %s", e)
 
+    async def cancel_pending(self, tx_id: int) -> dict | None:
+        """Force-settle a stuck 'pending' transaction to 'cancelled'.
+
+        Only acts on rows still 'pending' (never overwrites a settled verdict).
+        Returns the updated row, or None if not found / not pending / disabled.
+        """
+        if not self.enabled or tx_id is None:
+            return None
+
+        patch = {
+            "status": "cancelled",
+            "message": "Transaction annulée manuellement (déblocage d'un pending bloqué).",
+            "success": False,
+        }
+
+        def _update():
+            res = (
+                self._client.table("transactions")
+                .update(patch)
+                .eq("id", tx_id)
+                .eq("status", "pending")
+                .execute()
+            )
+            return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_update)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cancel_pending failed: %s", e)
+            return None
+
     async def list_transactions(self, aggregator: str | None = None, limit: int = 50) -> list[dict]:
         if not self.enabled:
             return []
