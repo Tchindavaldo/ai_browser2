@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
 
@@ -276,24 +277,40 @@ class BrowserController:
         log.info("Network capture stopped: %d requests", len(self.captured_requests))
         return self.captured_requests.copy()
 
-    def get_flutterwave_charge(self) -> CapturedRequest | None:
-        """Find the Flutterwave charge POST request in captured requests."""
+    def get_charge_request(self, matcher: Callable[[CapturedRequest], bool]) -> CapturedRequest | None:
+        """Find the first captured request matching `matcher` (the aggregator's
+        charge predicate). Generic — each aggregator supplies its own matcher."""
         for r in self.captured_requests:
-            if r.method != "POST":
-                continue
-            if ("flutterwave" in r.url or "ravepay" in r.url) and (
-                "/charge" in r.url
-            ):
+            if matcher(r):
                 return r
         return None
 
+    def get_verify_requests(self, matcher: Callable[[CapturedRequest], bool]) -> list[CapturedRequest]:
+        """Find all captured requests matching `matcher` (the aggregator's verify
+        predicate). Generic — each aggregator supplies its own matcher."""
+        return [r for r in self.captured_requests if matcher(r)]
+
+    # --- Flutterwave default matchers (used by DigiKUNTZ; thin wrappers over the
+    #     generic methods above so legacy callers keep working). ---
+    @staticmethod
+    def _flutterwave_charge_matcher(r: "CapturedRequest") -> bool:
+        return (
+            r.method == "POST"
+            and ("flutterwave" in r.url or "ravepay" in r.url)
+            and "/charge" in r.url
+        )
+
+    @staticmethod
+    def _flutterwave_verify_matcher(r: "CapturedRequest") -> bool:
+        return r.method == "POST" and "ravepay" in r.url and "/verify/" in r.url
+
+    def get_flutterwave_charge(self) -> CapturedRequest | None:
+        """Find the Flutterwave charge POST request in captured requests."""
+        return self.get_charge_request(self._flutterwave_charge_matcher)
+
     def get_flutterwave_verify_requests(self) -> list[CapturedRequest]:
         """Find all Flutterwave verify/mpesa polling requests."""
-        results = []
-        for r in self.captured_requests:
-            if r.method == "POST" and "ravepay" in r.url and "/verify/" in r.url:
-                results.append(r)
-        return results
+        return self.get_verify_requests(self._flutterwave_verify_matcher)
 
     async def _on_response(self, response: Response):
         """Callback for every network response."""
