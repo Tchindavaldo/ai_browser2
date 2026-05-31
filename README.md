@@ -53,7 +53,11 @@ playwright install chromium          # navigateur pour le mode browser
 cp .env.example .env                 # puis remplir les valeurs
 
 python main.py                       # démarre l'API (+ navigateur au boot)
+RELOAD=1 python main.py              # dev : hot-reload sur changement de .py
 ```
+
+> Le hot-reload (`RELOAD=1`) surveille le **code** (`.py`), pas le `.env`. Après avoir
+> modifié `.env` (ex: ajout Supabase), il faut **couper et relancer** le serveur.
 
 Variables d'environnement (cf. `.env.example`) : `DIGIKUNTZ_*`, `FLW_*`, `DEEPSEEK_API_KEY`,
 `SUPABASE_URL`/`SUPABASE_KEY`, `HEADLESS` (1 en prod), `PORT`, `HOST`.
