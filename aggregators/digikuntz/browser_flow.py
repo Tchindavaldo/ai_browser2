@@ -95,9 +95,30 @@ class DigikuntzAgent:
         agent_message = ""
         if loop_result.success and loop_result.result:
             try:
-                agent_result = json.loads(loop_result.result)
+                agent_result = json.loads(loop_result.result) if isinstance(loop_result.result, str) else loop_result.result
                 agent_status = agent_result.get("status", "unknown")
                 agent_message = agent_result.get("message", "")
+                # URL guard redirect: extract real status from payment-done URL.
+                final_url = agent_result.get("final_url", "")
+                if agent_status == "redirected" and "payment-done" in final_url:
+                    from urllib.parse import urlparse, parse_qs
+                    qs = parse_qs(urlparse(final_url).query)
+                    url_status = qs.get("status", ["unknown"])[0]
+                    tx_ref = qs.get("tx_ref", [""])[0]
+                    if url_status == "successful":
+                        result.final_status = "successful"
+                        result.final_message = "Paiement reussi."
+                    elif url_status == "failed":
+                        result.final_status = "failed"
+                        result.final_message = "Paiement échoué (solde insuffisant ou refus opérateur)."
+                    else:
+                        result.final_status = url_status or "unknown"
+                        result.final_message = f"Redirection payment-done: status={url_status}"
+                    if tx_ref and not result.transaction_id:
+                        result.transaction_id = tx_ref
+                    result.payment_status = result.final_status
+                    log.info("URL guard: payment-done status=%s tx_ref=%s", url_status, tx_ref)
+                    return
             except (json.JSONDecodeError, Exception):
                 pass
 
