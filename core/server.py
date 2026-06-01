@@ -21,6 +21,7 @@ from core.base import CurlTemplate, PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.config import settings
 from core.db import db
+from core.error_tracking import build_errors
 from core.llm_client import LlmClient, LlmConfig
 from core import registry
 
@@ -283,15 +284,19 @@ async def pay(req: PayRequest):
     # Insert the audit row as 'pending' now; update it with the verdict at the end.
     tx_id = await db.insert_pending(req.aggregator, req.mode, payment)
     result = None
+    engine_used = "replay"  # quel moteur a réellement produit le résultat
     try:
         if req.mode == "replay":
             result = await agg.replay(payment, template)
+            engine_used = "replay"
         elif req.mode == "browser":
             result = await _run_browser_and_save()
+            engine_used = "browser"
         else:  # auto: replay first, fall back to browser if inconclusive
             if template is not None:
                 try:
                     result = await agg.replay(payment, template)
+                    engine_used = "replay"
                 except Exception as e:  # noqa: BLE001
                     log.warning("auto: replay raised (%s)", e)
                     result = None
@@ -299,16 +304,21 @@ async def pay(req: PayRequest):
                 if inconclusive and req.fallback_browser:
                     log.info("auto: replay inconclusive -> falling back to browser")
                     result = await _run_browser_and_save()
+                    engine_used = "browser"
                 elif result is None:
                     raise HTTPException(502, "Replay failed and browser fallback disabled (fallback_browser=false)")
             else:
                 result = await _run_browser_and_save()
+                engine_used = "browser"
     finally:
         # Always settle the pending row so it never stays stuck 'pending'.
         if result is None:
             result = PaymentResult()
             result.final_status = "error"
             result.final_message = "Paiement interrompu (erreur serveur)."
+        # Dérive les erreurs détaillées (table transaction_errors) depuis le
+        # verdict, en distinguant le moteur et la source (ai/browser/transaction).
+        result.errors = build_errors(result, engine_used)
         await db.update_transaction(tx_id, result)
 
     return PayResponse(
@@ -377,6 +387,27 @@ async def transaction_trace(transaction_ref: str):
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
     traces = await db.get_traces(tx["id"])
     return {"transaction_ref": transaction_ref, "turns": len(traces), "trace": traces}
+
+
+@app.get(
+    "/transactions/{transaction_ref}/errors",
+    tags=["transactions"],
+    summary="Erreurs détaillées d'une transaction (browser/replay)",
+    responses={404: {"description": "Aucune transaction pour cette référence."}},
+)
+async def transaction_errors(transaction_ref: str):
+    """Renvoie les erreurs détaillées d'une transaction.
+
+    Chaque entrée précise le moteur (`engine`: browser/replay) et la SOURCE
+    (`source`: ai / browser / transaction / replay) pour savoir exactement où ça
+    a cassé, plus la catégorie, le message clair et les détails. Vide si la
+    transaction a réussi.
+    """
+    tx = await db.get_transaction(transaction_ref)
+    if tx is None:
+        raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
+    errors = await db.get_errors(tx["id"])
+    return {"transaction_ref": transaction_ref, "count": len(errors), "errors": errors}
 
 
 @app.post(

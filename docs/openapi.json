@@ -239,6 +239,50 @@
         }
       }
     },
+    "/transactions/{transaction_ref}/errors": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Erreurs détaillées d'une transaction (browser/replay)",
+        "description": "Renvoie les erreurs détaillées d'une transaction.\n\nChaque entrée précise le moteur (`engine`: browser/replay) et la SOURCE\n(`source`: ai / browser / transaction / replay) pour savoir exactement où ça\na cassé, plus la catégorie, le message clair et les détails. Vide si la\ntransaction a réussi.",
+        "operationId": "transaction_errors_transactions__transaction_ref__errors_get",
+        "parameters": [
+          {
+            "name": "transaction_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Transaction Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Aucune transaction pour cette référence."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/transactions/{tx_id}/cancel": {
       "post": {
         "tags": [

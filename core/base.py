@@ -59,6 +59,11 @@ class PaymentResult:
     # DEBUG (form-load): diagnostic captured when the checkout form isn't ready
     # on first paint (stalled assets / console / HTTP errors). None if form OK.
     form_load_diagnostic: dict = None
+    # Erreurs détaillées de la transaction (table transaction_errors). Chaque
+    # entrée: {engine, source, category, message, detail, turn}. Côté replay,
+    # en général 1 entrée; côté navigateur, possiblement plusieurs (on distingue
+    # source='ai' / 'browser' / 'transaction' pour savoir où ça a cassé).
+    errors: list = None
 
     def __post_init__(self):
         if self.captured_requests is None:
