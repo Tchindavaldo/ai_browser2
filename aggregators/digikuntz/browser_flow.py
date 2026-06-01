@@ -93,13 +93,19 @@ class DigikuntzAgent:
             f"\"message\": \"ce qui est affiche a l'ecran\"}}"
         )
 
-    async def decide_browser_outcome(self, req, loop_result, result) -> None:
+    async def decide_browser_outcome(self, req, loop_result, result, session=None) -> None:
         """DigiKUNTZ-specific outcome decision after the reasoning loop.
 
         Operates in place on `result` (sets final_status/final_message/
         payment_status/error_signals). Keeps the USSD watch loop + classifier/LLM
         verdict semantics here, as the generic runner stays provider-agnostic.
+
+        `session` is the isolated BrowserSession of this transaction (its own tab
+        + network capture). All page/capture reads go through it so concurrent
+        payments stay isolated.
         """
+        # Toutes les lectures page/réseau passent par la session isolée.
+        sb = session if session is not None else self.browser
         # 6. Parse agent immediate result
         agent_status = "unknown"
         agent_message = ""
@@ -137,7 +143,7 @@ class DigikuntzAgent:
         #     show an error and close instantly — the render watcher misses it,
         #     but the console error / failed request / HTTP 4xx-5xx response on
         #     the /charge endpoint is captured here.
-        error_signals = self.browser.get_error_signals()
+        error_signals = sb.get_error_signals()
         result.error_signals = error_signals
         has_error_signal = bool(
             error_signals["console_errors"]
@@ -158,7 +164,7 @@ class DigikuntzAgent:
         #    happens (validation OR refusal) — no fixed 60s wait.
         import asyncio
 
-        charge_req = self.browser.get_flutterwave_charge()
+        charge_req = sb.get_flutterwave_charge()
         charge_body = charge_req.response_body if charge_req else ""
         signals_text = json.dumps(error_signals, ensure_ascii=False) if has_error_signal else ""
 
@@ -179,12 +185,12 @@ class DigikuntzAgent:
 
         if ussd_detected and not agent_concluded:
             log.info("USSD sent! Watching for page change (react on change, no fixed wait)...")
-            await self.browser.watch_page_changes()
+            await sb.watch_page_changes()
             for i in range(60):  # safety cap 60s, but we break the instant anything changes
                 await asyncio.sleep(1)
 
                 # React the moment the page changes (validation or refusal).
-                watcher_status = await self.browser.get_page_status()
+                watcher_status = await sb.get_page_status()
                 if watcher_status and watcher_status.get("status") in ("changed", "redirected"):
                     page_text = watcher_status.get("message", "")
                     log.info("Page changed (poll %d): %s", i + 1, page_text[:200])
@@ -196,7 +202,7 @@ class DigikuntzAgent:
                     break
 
                 # Also react to a late error signal (charge rejected after USSD).
-                late = self.browser.get_error_signals()
+                late = sb.get_error_signals()
                 late_text = json.dumps(late, ensure_ascii=False)
                 hit = classifier.classify(late_text)
                 if hit and hit[0] in ("failed", "cancelled", "network_down"):
@@ -209,7 +215,7 @@ class DigikuntzAgent:
 
                 # Fallback: URL redirect away from checkout = done.
                 try:
-                    current_url = await self.browser.current_url()
+                    current_url = await sb.current_url()
                     if "flutterwave.com" not in current_url and \
                        "checkout-v3-ui-prod" not in current_url and \
                        "ravepay" not in current_url:

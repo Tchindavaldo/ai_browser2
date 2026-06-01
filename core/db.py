@@ -234,6 +234,57 @@ class Database:
             log.warning("get_transaction failed: %s", e)
             return None
 
+    # --- app_settings (réglages clé/valeur modifiables via API) ---
+    async def get_setting(self, key: str) -> str | None:
+        """Return the stored value for `key`, or None (missing / DB disabled)."""
+        if not self.enabled:
+            return None
+
+        def _select():
+            res = (
+                self._client.table("app_settings")
+                .select("value")
+                .eq("key", key)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0]["value"] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_setting(%s) failed: %s", key, e)
+            return None
+
+    async def set_setting(self, key: str, value: str) -> bool:
+        """Upsert a setting; True on success. No-op (False) if DB disabled."""
+        if not self.enabled:
+            return False
+
+        def _upsert():
+            self._client.table("app_settings").upsert(
+                {"key": key, "value": str(value)}, on_conflict="key"
+            ).execute()
+            return True
+
+        try:
+            return await asyncio.to_thread(_upsert)
+        except Exception as e:  # noqa: BLE001
+            log.warning("set_setting(%s) failed: %s", key, e)
+            return False
+
+    async def get_max_tabs(self, default: int) -> int:
+        """Persisted max-tabs-per-browser, falling back to `default` (env)."""
+        raw = await self.get_setting("max_tabs_per_browser")
+        try:
+            return int(raw) if raw is not None else default
+        except (ValueError, TypeError):
+            return default
+
+    async def set_max_tabs(self, value: int) -> bool:
+        """Persist the max-tabs-per-browser threshold."""
+        return await self.set_setting("max_tabs_per_browser", str(int(value)))
+
     # --- curl templates (deduced by browser mode, reused by replay mode) ---
     async def save_template(
         self, aggregator: str, template: CurlTemplate, force: bool = False

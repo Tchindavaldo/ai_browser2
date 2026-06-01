@@ -52,6 +52,13 @@ class Settings:
     headless: bool = field(default_factory=lambda: _env("HEADLESS", "0") == "1")
     port: int = field(default_factory=lambda: int(_env("PORT", "7332")))
 
+    # Concurrence navigateur : nb max d'onglets par instance Chrome avant d'en
+    # lancer une nouvelle. Valeur par défaut depuis l'env ; surchargée au boot
+    # par la valeur persistée en BD (app_settings) et modifiable via API.
+    max_tabs_per_browser: int = field(
+        default_factory=lambda: int(_env("MAX_TABS_PER_BROWSER", "20"))
+    )
+
     # Per-aggregator config
     digikuntz: DigikuntzConfig = field(default_factory=DigikuntzConfig)
 

@@ -59,6 +59,10 @@ class PaymentResult:
     # DEBUG (form-load): diagnostic captured when the checkout form isn't ready
     # on first paint (stalled assets / console / HTTP errors). None if form OK.
     form_load_diagnostic: dict = None
+    # Curl template deduced from this run's capture (browser mode). The session
+    # is released right after the flow, so the runner builds it here while it
+    # still holds the session, and /pay persists it from the result.
+    curl_template: "CurlTemplate | None" = None
 
     def __post_init__(self):
         if self.captured_requests is None:
@@ -133,11 +137,14 @@ class Aggregator(ABC):
         """The natural-language objective handed to the reasoning loop."""
 
     @abstractmethod
-    async def decide_browser_outcome(self, req: PaymentRequest, loop_result, result: PaymentResult) -> None:
+    async def decide_browser_outcome(
+        self, req: PaymentRequest, loop_result, result: PaymentResult, session=None
+    ) -> None:
         """Decide the final outcome after the reasoning loop (in place on result).
 
         Provider-specific (e.g. DigiKUNTZ's USSD watch loop + classifier/LLM
-        verdict); the generic runner delegates the verdict here.
+        verdict); the generic runner delegates the verdict here. `session` is the
+        isolated BrowserSession used for this transaction (its own tab/capture).
         """
 
     @abstractmethod
