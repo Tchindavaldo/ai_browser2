@@ -180,6 +180,56 @@ HEADERS = {
 }
 
 
+from dataclasses import dataclass as _dataclass, field as _field
+
+
+@_dataclass
+class ReplayConfig:
+    """Per-call Flutterwave config for a single replay.
+
+    Passed explicitly to step2/step3/step4 so concurrent replays never share
+    mutable module globals. `from_template` builds it from a stored CurlTemplate;
+    `defaults()` reuses the module-level values (CLI / no template).
+    """
+    charge_url: str = ""
+    verify_url: str = ""
+    init_url: str = ""
+    upgrade_url: str = ""
+    pub_key: str = ""
+    headers: dict = _field(default_factory=lambda: dict(HEADERS))
+
+    @classmethod
+    def defaults(cls) -> "ReplayConfig":
+        return cls(
+            charge_url=FLW_CHARGE_URL,
+            verify_url=FLW_VERIFY_URL,
+            init_url=FLW_INIT_URL,
+            upgrade_url=FLW_UPGRADE_URL,
+            pub_key=FLW_PUB_KEY,
+            headers=dict(HEADERS),
+        )
+
+    @classmethod
+    def from_template(cls, template) -> "ReplayConfig":
+        """Build from a CurlTemplate, falling back to defaults for empty fields."""
+        cfg = cls.defaults()
+        if not template:
+            return cfg
+        if template.charge_url:
+            cfg.charge_url = template.charge_url
+        if template.verify_url:
+            cfg.verify_url = template.verify_url
+        if getattr(template, "init_url", ""):
+            cfg.init_url = template.init_url
+        if getattr(template, "upgrade_url", ""):
+            cfg.upgrade_url = template.upgrade_url
+        if getattr(template, "flw_pub_key", ""):
+            cfg.pub_key = template.flw_pub_key
+        if template.headers:
+            cfg.headers = dict(template.headers)
+        return cfg
+
+
 def encrypt_payload(plaintext: str, public_key_b64: str) -> str:
     """Encrypt plaintext using RSA public key in cryptico format.
 
@@ -231,8 +281,9 @@ async def step1_create_transaction(
         return data
 
 
-async def step2_initialize_checkout(payment_link: str) -> dict:
+async def step2_initialize_checkout(payment_link: str, cfg: "ReplayConfig | None" = None) -> dict:
     """Load the payment link, initialize checkout, extract RSA public key."""
+    cfg = cfg or ReplayConfig.defaults()
     print(f"[2] Initializing checkout...")
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -246,10 +297,10 @@ async def step2_initialize_checkout(payment_link: str) -> dict:
 
         # Upgrade checkout
         hosted_data = hosted.get("data", {})
-        await client.post(FLW_UPGRADE_URL, json=hosted_data, headers=HEADERS)
+        await client.post(cfg.upgrade_url, json=hosted_data, headers=cfg.headers)
 
         # Initialize — this returns the RSA public key
-        resp4 = await client.post(FLW_INIT_URL, json=hosted_data, headers=HEADERS)
+        resp4 = await client.post(cfg.init_url, json=hosted_data, headers=cfg.headers)
         init_resp = resp4.json()
         init_data = init_resp.get("data") or {}
         public_key = init_data.get("public_key", "") if init_data else ""
@@ -273,8 +324,10 @@ async def step3_charge(
     tx_ref: str,
     public_key_rsa: str,
     redirect_url: str = "https://payments.digikuntz.com/payment-done/subscription/packages",
+    cfg: "ReplayConfig | None" = None,
 ) -> dict:
     """Send the charge request using cryptico encryption (same as browser)."""
+    cfg = cfg or ReplayConfig.defaults()
     import subprocess
 
     print(f"[3] Sending charge: {amount} XAF, {network}, {phone}")
@@ -301,7 +354,7 @@ async def step3_charge(
         ],
         "modalauditid": modalauditid,
         "payment_type": "mobilemoneyfranco",
-        "PBFPubKey": FLW_PUB_KEY,
+        "PBFPubKey": cfg.pub_key,
         "redirect_url": redirect_url,
         "txRef": tx_ref,
         "is_mobile_money_franco": True,
@@ -326,7 +379,7 @@ async def step3_charge(
     # Send charge request (same format as captured from browser)
     charge_body = {
         "modalauditid": modalauditid,
-        "PBFPubKey": FLW_PUB_KEY,
+        "PBFPubKey": cfg.pub_key,
         "client": encrypted,
     }
 
@@ -338,9 +391,9 @@ async def step3_charge(
         for attempt in range(1, max_attempts + 1):
             try:
                 resp = await client.post(
-                    FLW_CHARGE_URL,
+                    cfg.charge_url,
                     json=charge_body,
-                    headers=HEADERS,
+                    headers=cfg.headers,
                 )
                 result = resp.json()
             except (httpx.HTTPError, json.JSONDecodeError) as e:
@@ -359,7 +412,7 @@ async def step3_charge(
                     for i in range(20):
                         await asyncio.sleep(3)
                         try:
-                            pr = await ping_client.get(ping_url, headers=HEADERS)
+                            pr = await ping_client.get(ping_url, headers=cfg.headers)
                             ping_data = pr.json()
                         except Exception:
                             continue
@@ -396,16 +449,19 @@ async def step3_charge(
 
 
 async def step4_poll_verify(
-    modalauditid: str, flw_ref: str, timeout_s: int = 1020
+    modalauditid: str, flw_ref: str, timeout_s: int = 1020, cfg: "ReplayConfig | None" = None
 ) -> dict:
     """Poll the verify endpoint until payment is confirmed or failed.
 
     Runs for at most ``timeout_s`` of REAL wall-clock time (default 1020s =
     17 min — the observed delay before the operator auto-cancels an
-    unvalidated transaction, +1 min margin). A single network hiccup on one
-    poll (ReadTimeout, reset, non-JSON body) is ignored: we skip that tick and
-    keep polling until the budget is spent or a final verdict arrives.
+    unvalidated transaction, +1 min margin). The clock (`start`/`deadline`) is
+    local to this call, so concurrent replays each get their own 17-min budget.
+    A single network hiccup on one poll (ReadTimeout, reset, non-JSON body) is
+    ignored: we skip that tick and keep polling until the budget is spent or a
+    final verdict arrives.
     """
+    cfg = cfg or ReplayConfig.defaults()
     print(f"[4] Polling verify (flw_ref={flw_ref})... (max {timeout_s}s)")
 
     start = time.monotonic()
@@ -420,13 +476,13 @@ async def step4_poll_verify(
             i += 1
             try:
                 resp = await client.post(
-                    FLW_VERIFY_URL,
+                    cfg.verify_url,
                     json={
                         "modalauditid": modalauditid,
-                        "PBFPubKey": FLW_PUB_KEY,
+                        "PBFPubKey": cfg.pub_key,
                         "flw_ref": flw_ref,
                     },
-                    headers=HEADERS,
+                    headers=cfg.headers,
                 )
                 data = resp.json()
             except (httpx.HTTPError, json.JSONDecodeError) as e:

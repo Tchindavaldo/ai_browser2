@@ -5,7 +5,6 @@ Adapter that exposes the existing browser_flow (AI-driven) and replay_flow
 itself in the registry under the name "digikuntz".
 """
 
-import contextlib
 import json
 import logging
 
@@ -21,37 +20,6 @@ from . import replay_flow
 log = logging.getLogger("ai_browser2")
 
 
-@contextlib.contextmanager
-def _apply_template(template: "CurlTemplate | None"):
-    """Temporarily override replay_flow module constants from a stored template.
-
-    step3_charge / step4_poll_verify read module-level FLW_* and HEADERS; this
-    lets a DB template drive the URLs/headers/pubkey without touching the tuned
-    retry/poll logic. Original values are restored on exit.
-    """
-    if not template:
-        yield
-        return
-    overrides = {
-        "FLW_CHARGE_URL": template.charge_url,
-        "FLW_VERIFY_URL": template.verify_url,
-        "FLW_INIT_URL": template.init_url,
-        "FLW_UPGRADE_URL": template.upgrade_url,
-        "FLW_PUB_KEY": template.flw_pub_key,
-    }
-    saved = {}
-    try:
-        for name, value in overrides.items():
-            if value:  # only override when the template actually has a value
-                saved[name] = getattr(replay_flow, name)
-                setattr(replay_flow, name, value)
-        if template.headers:
-            saved["HEADERS"] = replay_flow.HEADERS
-            replay_flow.HEADERS = dict(template.headers)
-        yield
-    finally:
-        for name, value in saved.items():
-            setattr(replay_flow, name, value)
 
 
 class DigikuntzAggregator(Aggregator):
@@ -140,71 +108,73 @@ class DigikuntzAggregator(Aggregator):
     async def replay(self, req: PaymentRequest, template: CurlTemplate) -> PaymentResult:
         """Reproduce the payment using replay_flow steps (no browser).
 
-        The stored template drives the URLs/headers/pubkey (via _apply_template);
-        step1..step4 retain their tuned retry/poll logic untouched.
+        The stored template is turned into a per-call ReplayConfig passed
+        explicitly to step2/3/4 — no module globals are mutated, so concurrent
+        replays never share state. step1..step4 keep their tuned retry/poll logic.
         """
         result = PaymentResult()
-        # Template overrides the FLW_* URLs / HEADERS for the whole replay.
-        with _apply_template(template):
-            try:
-                tx = await replay_flow.step1_create_transaction(
-                    req.amount, req.phone, req.email, req.sender_name
-                )
-            except Exception as e:  # noqa: BLE001 — surface any creation failure
-                result.error = f"digikuntz create_transaction error: {e}"
-                return result
-
-            tx_ref = tx.get("transactionRef", "")
-            payment_link = tx.get("paymentLink", "")
-            total = int(tx.get("paymentWithTaxes", req.amount))
-            result.transaction_id = tx_ref
-            if not payment_link:
-                result.error = f"No paymentLink in response: {tx}"
-                return result
-
-            # RSA public key: prefer the stored template, else (re)initialize.
-            public_key_rsa = template.public_key_rsa if template else ""
-            if not public_key_rsa:
-                try:
-                    checkout = await replay_flow.step2_initialize_checkout(payment_link)
-                    public_key_rsa = checkout.get("public_key", "")
-                except Exception as e:  # noqa: BLE001
-                    log.warning("replay step2 failed (%s), will rely on fallback key", e)
-
-            charge = await replay_flow.step3_charge(
-                amount=total,
-                phone=req.phone,
-                network=req.network,
-                email=req.email,
-                firstname="API",
-                lastname=f"Call: {req.sender_name}",
-                tx_ref=tx_ref,
-                public_key_rsa=public_key_rsa,
+        # Per-call config from the template (URLs/headers/pubkey). Isolated.
+        cfg = replay_flow.ReplayConfig.from_template(template)
+        try:
+            tx = await replay_flow.step1_create_transaction(
+                req.amount, req.phone, req.email, req.sender_name
             )
-            charge_resp = charge.get("charge_response", {})
-            result.flutterwave_charge_response = str(charge_resp)[:1000]
+        except Exception as e:  # noqa: BLE001 — surface any creation failure
+            result.error = f"digikuntz create_transaction error: {e}"
+            return result
 
-            verdict = self.interpret_status("charge", charge_resp, req.network)
-            if verdict:
-                result.final_status, result.final_message = verdict
-                result.success = result.final_status == "successful"
-                result.payment_status = result.final_status
-                return result
+        tx_ref = tx.get("transactionRef", "")
+        payment_link = tx.get("paymentLink", "")
+        total = int(tx.get("paymentWithTaxes", req.amount))
+        result.transaction_id = tx_ref
+        if not payment_link:
+            result.error = f"No paymentLink in response: {tx}"
+            return result
 
-            # Extract flw_ref then poll verify (17-min clock budget lives in step4).
-            charge_data = charge_resp.get("data", {})
-            flw_ref = ""
-            if isinstance(charge_data, dict):
-                flw_ref = charge_data.get("flw_ref", "")
-                if not flw_ref:
-                    nested = charge_data.get("data", {})
-                    if isinstance(nested, dict):
-                        flw_ref = nested.get("flw_reference", "")
+        # RSA public key: prefer the stored template, else (re)initialize.
+        public_key_rsa = template.public_key_rsa if template else ""
+        if not public_key_rsa:
+            try:
+                checkout = await replay_flow.step2_initialize_checkout(payment_link, cfg=cfg)
+                public_key_rsa = checkout.get("public_key", "")
+            except Exception as e:  # noqa: BLE001
+                log.warning("replay step2 failed (%s), will rely on fallback key", e)
+
+        charge = await replay_flow.step3_charge(
+            amount=total,
+            phone=req.phone,
+            network=req.network,
+            email=req.email,
+            firstname="API",
+            lastname=f"Call: {req.sender_name}",
+            tx_ref=tx_ref,
+            public_key_rsa=public_key_rsa,
+            cfg=cfg,
+        )
+        charge_resp = charge.get("charge_response", {})
+        result.flutterwave_charge_response = str(charge_resp)[:1000]
+
+        verdict = self.interpret_status("charge", charge_resp, req.network)
+        if verdict:
+            result.final_status, result.final_message = verdict
+            result.success = result.final_status == "successful"
+            result.payment_status = result.final_status
+            return result
+
+        # Extract flw_ref then poll verify (17-min clock budget lives in step4).
+        charge_data = charge_resp.get("data", {})
+        flw_ref = ""
+        if isinstance(charge_data, dict):
+            flw_ref = charge_data.get("flw_ref", "")
             if not flw_ref:
-                result.error = "No flw_ref in charge response"
-                return result
+                nested = charge_data.get("data", {})
+                if isinstance(nested, dict):
+                    flw_ref = nested.get("flw_reference", "")
+        if not flw_ref:
+            result.error = "No flw_ref in charge response"
+            return result
 
-            verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref)
+        verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref, cfg=cfg)
 
         verdict = self.interpret_status("verify", verify, req.network)
         if verdict:
