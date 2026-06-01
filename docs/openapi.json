@@ -147,6 +147,9 @@
           },
           "502": {
             "description": "Replay échoué et fallback navigateur désactivé."
+          },
+          "503": {
+            "description": "Service de paiement amont temporairement indisponible (code=network_unavailable). Réessayer plus tard."
           }
         }
       }

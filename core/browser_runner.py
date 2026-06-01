@@ -19,6 +19,7 @@ import logging
 from core.base import Aggregator, PaymentRequest, PaymentResult
 from core.config import settings
 from core.reasoning_loop import ReasoningLoop
+from core.upstream_errors import classify_upstream_error
 
 log = logging.getLogger("ai_browser2")
 
@@ -62,6 +63,7 @@ async def _run_browser_flow_in_session(
         tx = await aggregator.create_transaction(req)
     except Exception as e:  # noqa: BLE001
         result.error = f"{aggregator.name} API error: {e}"
+        result.error_code = classify_upstream_error(e) or ""
         log.error(result.error)
         return result
 

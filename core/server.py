@@ -24,6 +24,7 @@ from core.config import settings
 from core.db import db
 from core.error_tracking import build_errors
 from core.llm_client import LlmClient, LlmConfig
+from core.upstream_errors import NETWORK_UNAVAILABLE, NETWORK_UNAVAILABLE_MESSAGE
 from core import registry
 
 logging.basicConfig(
@@ -239,6 +240,8 @@ async def set_max_tabs(req: MaxTabsRequest):
         422: {"description": "Réseau non supporté (renvoie la liste exacte attendue)."},
         409: {"description": "Mode replay sans template (lancer mode=browser d'abord)."},
         502: {"description": "Replay échoué et fallback navigateur désactivé."},
+        503: {"description": "Service de paiement amont temporairement indisponible "
+                             "(code=network_unavailable). Réessayer plus tard."},
     },
 )
 async def pay(req: PayRequest):
@@ -318,7 +321,12 @@ async def pay(req: PayRequest):
                     "transaction_id": last.get("id"),
                 },
             )
-        if status not in ("successful", "completed", "success"):
+        # Statuts "non-tentés" : la transaction n'a jamais atteint l'opérateur
+        # (panne API amont, erreur serveur avant déclenchement). Ils ne bloquent
+        # PAS le numéro — sinon une panne réseau gèlerait le client 17 min pour
+        # rien. Seul un échec RÉEL (failed/cancelled) déclenche la fenêtre retry.
+        _NON_ATTEMPTED = (NETWORK_UNAVAILABLE, "unknown", "error", "")
+        if status not in ("successful", "completed", "success") and status not in _NON_ATTEMPTED:
             elapsed = _seconds_since(last.get("created_at"))
             if elapsed is not None and elapsed < settings.retry_window_s:
                 remaining = int(settings.retry_window_s - elapsed)
@@ -401,10 +409,26 @@ async def pay(req: PayRequest):
             result = PaymentResult()
             result.final_status = "error"
             result.final_message = "Paiement interrompu (erreur serveur)."
+        # Panne amont (API agrégateur down) : la transaction n'a JAMAIS atteint
+        # l'opérateur — on la marque 'network_unavailable' pour que la garde
+        # anti-doublon ne bloque PAS le numéro (rien n'a été déclenché).
+        if result.error_code == NETWORK_UNAVAILABLE:
+            result.final_status = NETWORK_UNAVAILABLE
+            result.final_message = NETWORK_UNAVAILABLE_MESSAGE
         # Dérive les erreurs détaillées (table transaction_errors) depuis le
         # verdict, en distinguant le moteur et la source (ai/browser/transaction).
         result.errors = build_errors(result, engine_used)
         await db.update_transaction(tx_id, result)
+
+    # API agrégateur amont en panne (503/timeout/réseau) : on a tracé le détail
+    # en BD + logs ci-dessus ; au dev intégrateur on renvoie un 503 propre avec
+    # un code stable + message FR, SANS exposer l'URL interne ni la stacktrace.
+    if result.error_code == NETWORK_UNAVAILABLE:
+        log.warning("Upstream indisponible (tx_id=%s): %s", tx_id, result.error)
+        raise HTTPException(
+            503,
+            {"code": NETWORK_UNAVAILABLE, "message": NETWORK_UNAVAILABLE_MESSAGE},
+        )
 
     return PayResponse(
         success=result.success,

@@ -12,6 +12,7 @@ from core.base import Aggregator, CurlTemplate, PaymentRequest, PaymentResult
 from core.browser import CapturedRequest, BrowserSession
 from core.browser_runner import run_browser_flow
 from core.config import settings
+from core.upstream_errors import classify_upstream_error
 from core.registry import register
 
 from . import browser_flow
@@ -121,6 +122,7 @@ class DigikuntzAggregator(Aggregator):
             )
         except Exception as e:  # noqa: BLE001 — surface any creation failure
             result.error = f"digikuntz create_transaction error: {e}"
+            result.error_code = classify_upstream_error(e) or ""
             return result
 
         tx_ref = tx.get("transactionRef", "")
