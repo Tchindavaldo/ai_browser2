@@ -149,6 +149,58 @@ class Database:
 
         # Persist the per-turn AI trace into its dedicated table (browser mode).
         await self.save_trace(tx_id, result.trace)
+        # Persist detailed errors (table transaction_errors).
+        await self.save_errors(tx_id, result.errors)
+
+    async def save_errors(self, tx_id: int, errors: list[dict] | None) -> None:
+        """Insert one transaction_errors row per detailed error, linked to tx_id.
+
+        Each error dict: {engine, source, category, message, detail, turn}.
+        No-op if there are no errors (a successful transaction logs none).
+        """
+        if not self.enabled or tx_id is None or not errors:
+            return
+        rows = [
+            {
+                "transaction_id": tx_id,
+                "engine": e.get("engine", ""),
+                "source": e.get("source", ""),
+                "category": e.get("category"),
+                "message": e.get("message"),
+                "detail": e.get("detail"),
+                "turn": e.get("turn"),
+            }
+            for e in errors
+        ]
+
+        def _insert():
+            self._client.table("transaction_errors").insert(rows).execute()
+
+        try:
+            await asyncio.to_thread(_insert)
+        except Exception as e:  # noqa: BLE001
+            log.warning("save_errors failed: %s", e)
+
+    async def get_errors(self, transaction_id: int) -> list[dict]:
+        """Return the detailed error rows for a transaction (newest first)."""
+        if not self.enabled:
+            return []
+
+        def _select():
+            res = (
+                self._client.table("transaction_errors")
+                .select("*")
+                .eq("transaction_id", transaction_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return res.data or []
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_errors failed: %s", e)
+            return []
 
     async def save_trace(self, tx_id: int, trace: list[dict]) -> None:
         """Insert one transaction_traces row per AI turn, linked to tx_id."""

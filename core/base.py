@@ -63,6 +63,11 @@ class PaymentResult:
     # is released right after the flow, so the runner builds it here while it
     # still holds the session, and /pay persists it from the result.
     curl_template: "CurlTemplate | None" = None
+    # Erreurs détaillées de la transaction (table transaction_errors). Chaque
+    # entrée: {engine, source, category, message, detail, turn}. Côté replay,
+    # en général 1 entrée; côté navigateur, possiblement plusieurs (on distingue
+    # source='ai' / 'browser' / 'transaction' pour savoir où ça a cassé).
+    errors: list = None
 
     def __post_init__(self):
         if self.captured_requests is None:
