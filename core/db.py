@@ -68,6 +68,37 @@ class Database:
             log.warning("has_pending failed: %s", e)
             return False
 
+    async def last_transaction_for_number(
+        self, aggregator: str, phone: str
+    ) -> dict | None:
+        """Most recent transaction for (aggregator, phone), or None.
+
+        Returns the full row (id, status, created_at, ...) so the /pay guard can
+        decide: a still-'pending' row blocks (confirm/cancel), and a recent
+        non-success row within the retry window blocks with a wait time. Safe
+        (None) if Supabase is disabled.
+        """
+        if not self.enabled:
+            return None
+
+        def _select():
+            res = (
+                self._client.table("transactions")
+                .select("*")
+                .eq("aggregator", aggregator)
+                .eq("phone", phone)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("last_transaction_for_number failed: %s", e)
+            return None
+
     async def insert_pending(
         self, aggregator: str, mode: str, req: PaymentRequest
     ) -> int | None:

@@ -10,6 +10,7 @@ Every attempt is audited in the transactions table (when Supabase is configured)
 import dataclasses
 import logging
 import sys
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -35,6 +36,38 @@ logging.basicConfig(
 for noisy in ("httpx", "httpcore", "uvicorn.access", "hpack", "openai"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("ai_browser2")
+
+
+def _seconds_since(created_at) -> float | None:
+    """Seconds elapsed since a Supabase timestamp (ISO str), or None if unknown.
+
+    Supabase returns created_at as an ISO-8601 string (UTC, often with a 'Z' or
+    +00:00 offset). Returns None on any parse failure so the guard degrades to
+    'allow' rather than blocking on a malformed value.
+    """
+    if not created_at:
+        return None
+    try:
+        s = created_at.replace("Z", "+00:00") if isinstance(created_at, str) else created_at
+        dt = datetime.fromisoformat(s) if isinstance(s, str) else s
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except (ValueError, TypeError) as e:
+        log.warning("_seconds_since parse failed for %r: %s", created_at, e)
+        return None
+
+
+def _fmt_duration(seconds: int) -> str:
+    """Human-friendly FR duration for the retry message (e.g. '12 min 30 s')."""
+    seconds = max(0, int(seconds))
+    m, s = divmod(seconds, 60)
+    if m and s:
+        return f"{m} min {s} s"
+    if m:
+        return f"{m} min"
+    return f"{s} s"
+
 
 # Global state
 browser: BrowserController | None = None
@@ -237,17 +270,45 @@ async def pay(req: PayRequest):
         callback_url=req.callback_url,
     )
 
-    # Refuse a new payment on a number that already has one in flight.
-    if await db.has_pending(req.aggregator, req.phone):
-        raise HTTPException(
-            409,
-            {
-                "error": "pending_exists",
-                "message": f"Une transaction est déjà en cours (pending) sur le numéro {req.phone}.",
-                "aggregator": req.aggregator,
-                "phone": req.phone,
-            },
-        )
+    # Garde anti-doublon par numéro (vaut pour curl ET navigateur).
+    #  - dernière transaction encore 'pending' → bloque : à confirmer ou annuler.
+    #  - dernière transaction non-succès ET dans la fenêtre retry_window_s
+    #    (17 min, le délai opérateur) → bloque avec le temps restant à attendre.
+    last = await db.last_transaction_for_number(req.aggregator, req.phone)
+    if last:
+        status = (last.get("status") or "").lower()
+        if status == "pending":
+            raise HTTPException(
+                409,
+                {
+                    "error": "pending_exists",
+                    "message": (
+                        f"Une transaction est déjà en cours (pending) sur le numéro "
+                        f"{req.phone}. Veuillez la confirmer ou l'annuler."
+                    ),
+                    "aggregator": req.aggregator,
+                    "phone": req.phone,
+                    "transaction_id": last.get("id"),
+                },
+            )
+        if status not in ("successful", "completed", "success"):
+            elapsed = _seconds_since(last.get("created_at"))
+            if elapsed is not None and elapsed < settings.retry_window_s:
+                remaining = int(settings.retry_window_s - elapsed)
+                raise HTTPException(
+                    409,
+                    {
+                        "error": "retry_too_soon",
+                        "message": (
+                            f"Une transaction récente ({status}) existe sur le numéro "
+                            f"{req.phone}. Réessayez dans {_fmt_duration(remaining)}."
+                        ),
+                        "aggregator": req.aggregator,
+                        "phone": req.phone,
+                        "last_status": status,
+                        "retry_after_s": remaining,
+                    },
+                )
 
     async def _run_browser_and_save():
         """Browser flow + deduce/persist the curl template from the capture."""
