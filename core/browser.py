@@ -44,6 +44,7 @@ class DomSnapshot:
     interactive_elements: list[dict] = field(default_factory=list)
     url_history: list[str] = field(default_factory=list)   # URLs visitées depuis le début
     elapsed_s: float = 0.0                                  # secondes depuis le début du loop
+    deadline_exceeded: bool = False                         # plafond 17min dépassé (l'IA doit conclure)
     frame_detached_count: int = 0  # combien de fois l'iframe s'est détachée depuis le début
     # Réseau — vision complète comme DevTools
     pending_requests: list[dict] = field(default_factory=list)
