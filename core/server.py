@@ -24,6 +24,7 @@ from core.config import settings
 from core.db import db
 from core.error_tracking import build_errors
 from core.llm_client import LlmClient, LlmConfig
+from core.upstream_errors import NETWORK_UNAVAILABLE, NETWORK_UNAVAILABLE_MESSAGE
 from core import registry
 
 logging.basicConfig(
@@ -239,6 +240,8 @@ async def set_max_tabs(req: MaxTabsRequest):
         422: {"description": "Réseau non supporté (renvoie la liste exacte attendue)."},
         409: {"description": "Mode replay sans template (lancer mode=browser d'abord)."},
         502: {"description": "Replay échoué et fallback navigateur désactivé."},
+        503: {"description": "Service de paiement amont temporairement indisponible "
+                             "(code=network_unavailable). Réessayer plus tard."},
     },
 )
 async def pay(req: PayRequest):
@@ -405,6 +408,16 @@ async def pay(req: PayRequest):
         # verdict, en distinguant le moteur et la source (ai/browser/transaction).
         result.errors = build_errors(result, engine_used)
         await db.update_transaction(tx_id, result)
+
+    # API agrégateur amont en panne (503/timeout/réseau) : on a tracé le détail
+    # en BD + logs ci-dessus ; au dev intégrateur on renvoie un 503 propre avec
+    # un code stable + message FR, SANS exposer l'URL interne ni la stacktrace.
+    if result.error_code == NETWORK_UNAVAILABLE:
+        log.warning("Upstream indisponible (tx_id=%s): %s", tx_id, result.error)
+        raise HTTPException(
+            503,
+            {"code": NETWORK_UNAVAILABLE, "message": NETWORK_UNAVAILABLE_MESSAGE},
+        )
 
     return PayResponse(
         success=result.success,

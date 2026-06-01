@@ -62,7 +62,7 @@ class Settings:
     # lancer une nouvelle. Valeur par défaut depuis l'env ; surchargée au boot
     # par la valeur persistée en BD (app_settings) et modifiable via API.
     max_tabs_per_browser: int = field(
-        default_factory=lambda: int(_env("MAX_TABS_PER_BROWSER", "20"))
+        default_factory=lambda: int(_env("MAX_TABS_PER_BROWSER", "15"))
     )
 
     # Per-aggregator config

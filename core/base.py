@@ -29,6 +29,9 @@ class PaymentRequest:
 class PaymentResult:
     success: bool = False
     error: str = ""
+    # Code machine stable pour le dev intégrateur (ex. "network_unavailable")
+    # quand l'API agrégateur amont est en panne. None = pas d'erreur catégorisée.
+    error_code: str = ""
     transaction_id: str = ""
     payment_status: str = ""
     turns: int = 0
