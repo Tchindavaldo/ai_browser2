@@ -78,9 +78,11 @@ llm: LlmClient | None = None
 async def lifespan(app: FastAPI):
     global browser, llm
 
-    # Start browser (visible by default so you can watch!)
+    # Start browser pool (visible by default so you can watch!). The max-tabs
+    # threshold comes from env, then is overridden by the DB value if present.
     headless = settings.headless
-    browser = BrowserController(headless=headless)
+    max_tabs = await db.get_max_tabs(default=settings.max_tabs_per_browser)
+    browser = BrowserController(headless=headless, max_tabs=max_tabs)
     await browser.start()
 
     # Init LLM client
@@ -201,6 +203,30 @@ async def list_aggregators():
     }
 
 
+class MaxTabsRequest(BaseModel):
+    max_tabs: int = Field(..., ge=1, le=200,
+                          description="Nb max d'onglets par instance Chrome.",
+                          examples=[20])
+
+
+@app.get("/config/max-tabs", tags=["system"], summary="Seuil d'onglets par navigateur")
+async def get_max_tabs():
+    """Nombre max d'onglets par Chrome avant d'en lancer un nouveau (concurrence)."""
+    pools = len(browser._browsers) if browser else 0
+    return {"max_tabs": browser.max_tabs if browser else None, "open_browsers": pools}
+
+
+@app.put("/config/max-tabs", tags=["system"], summary="Modifier le seuil d'onglets")
+async def set_max_tabs(req: MaxTabsRequest):
+    """Change le seuil (persisté en BD, appliqué immédiatement au pool en cours)."""
+    if not browser:
+        raise HTTPException(500, "Not initialized")
+    await db.set_max_tabs(req.max_tabs)   # persiste (no-op si Supabase off)
+    browser.max_tabs = req.max_tabs       # effet immédiat sur le pool vivant
+    log.info("max_tabs_per_browser -> %d", req.max_tabs)
+    return {"max_tabs": browser.max_tabs}
+
+
 @app.post(
     "/pay",
     response_model=PayResponse,
@@ -311,16 +337,14 @@ async def pay(req: PayRequest):
                 )
 
     async def _run_browser_and_save():
-        """Browser flow + deduce/persist the curl template from the capture."""
+        """Browser flow + persist the curl template deduced during the run.
+
+        The runner builds res.curl_template while it still holds the (now
+        isolated) browser session; we just persist it here.
+        """
         res = await agg.pay_via_browser(payment)
-        charge = browser.get_charge_request(agg.charge_request_matcher)
-        if charge:
-            verify_reqs = browser.get_verify_requests(agg.verify_request_matcher)
-            template = agg.extract_curl_template(
-                charge, verify_reqs[-1] if verify_reqs else None, res.public_key
-            )
-            if template:
-                await db.save_template(req.aggregator, template)
+        if res.curl_template:
+            await db.save_template(req.aggregator, res.curl_template)
         return res
 
     # Resolve the template / 409 paths BEFORE creating the pending row, so a
@@ -535,35 +559,37 @@ async def drive(req: DriveRequest):
 
     from core.reasoning_loop import ReasoningLoop
 
-    # Capture all network requests
-    browser.start_capture()
-    await browser.goto(req.url)
-    loop = ReasoningLoop(browser, llm, max_turns=15)
-    result = await loop.run(req.objective)
-    captured = browser.stop_capture()
+    # Acquire an isolated session for this dev run, release it when done.
+    session = await browser.acquire_session()
+    try:
+        session.start_capture()
+        await session.goto(req.url)
+        loop = ReasoningLoop(session, llm, max_turns=15)
+        result = await loop.run(req.objective)
+        captured = session.stop_capture()
+        charge = session.get_flutterwave_charge()
 
-    # Find Flutterwave charge
-    charge = browser.get_flutterwave_charge()
-
-    return {
-        "success": result.success,
-        "result": result.result,
-        "error": result.error,
-        "turns": result.turns,
-        "input_tokens": result.total_input_tokens,
-        "output_tokens": result.total_output_tokens,
-        "flutterwave_charge": {
-            "url": charge.url if charge else "",
-            "method": charge.method if charge else "",
-            "request_body": charge.request_body if charge else "",
-            "response_body": charge.response_body[:1000] if charge else "",
-            "curl_replay": charge.to_curl() if charge else "",
-        },
-        "all_requests": [
-            {"method": r.method, "url": r.url[:200], "status": r.status}
-            for r in captured
-        ],
-    }
+        return {
+            "success": result.success,
+            "result": result.result,
+            "error": result.error,
+            "turns": result.turns,
+            "input_tokens": result.total_input_tokens,
+            "output_tokens": result.total_output_tokens,
+            "flutterwave_charge": {
+                "url": charge.url if charge else "",
+                "method": charge.method if charge else "",
+                "request_body": charge.request_body if charge else "",
+                "response_body": charge.response_body[:1000] if charge else "",
+                "curl_replay": charge.to_curl() if charge else "",
+            },
+            "all_requests": [
+                {"method": r.method, "url": r.url[:200], "status": r.status}
+                for r in captured
+            ],
+        }
+    finally:
+        await browser.release_session(session)
 
 
 @app.post("/test-llm", tags=["dev"], summary="Ping du LLM (dev)")

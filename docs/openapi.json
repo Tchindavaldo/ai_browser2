@@ -46,6 +46,64 @@
         }
       }
     },
+    "/config/max-tabs": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Seuil d'onglets par navigateur",
+        "description": "Nombre max d'onglets par Chrome avant d'en lancer un nouveau (concurrence).",
+        "operationId": "get_max_tabs_config_max_tabs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Modifier le seuil d'onglets",
+        "description": "Change le seuil (persisté en BD, appliqué immédiatement au pool en cours).",
+        "operationId": "set_max_tabs_config_max_tabs_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaxTabsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/pay": {
       "post": {
         "tags": [
@@ -488,6 +546,25 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "MaxTabsRequest": {
+        "properties": {
+          "max_tabs": {
+            "type": "integer",
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Max Tabs",
+            "description": "Nb max d'onglets par instance Chrome.",
+            "examples": [
+              20
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "max_tabs"
+        ],
+        "title": "MaxTabsRequest"
       },
       "PayRequest": {
         "properties": {

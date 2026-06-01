@@ -58,6 +58,13 @@ class Settings:
     # navigateur, (b) à la garde anti-doublon par numéro côté /pay.
     retry_window_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_S", "1020")))
 
+    # Concurrence navigateur : nb max d'onglets par instance Chrome avant d'en
+    # lancer une nouvelle. Valeur par défaut depuis l'env ; surchargée au boot
+    # par la valeur persistée en BD (app_settings) et modifiable via API.
+    max_tabs_per_browser: int = field(
+        default_factory=lambda: int(_env("MAX_TABS_PER_BROWSER", "20"))
+    )
+
     # Per-aggregator config
     digikuntz: DigikuntzConfig = field(default_factory=DigikuntzConfig)
 

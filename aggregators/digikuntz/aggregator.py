@@ -9,7 +9,7 @@ import json
 import logging
 
 from core.base import Aggregator, CurlTemplate, PaymentRequest, PaymentResult
-from core.browser import CapturedRequest
+from core.browser import CapturedRequest, BrowserSession
 from core.browser_runner import run_browser_flow
 from core.config import settings
 from core.registry import register
@@ -44,17 +44,17 @@ class DigikuntzAggregator(Aggregator):
     def browser_objective(self, req: PaymentRequest) -> str:
         return self._agent.browser_objective(req)
 
-    async def decide_browser_outcome(self, req, loop_result, result) -> None:
-        await self._agent.decide_browser_outcome(req, loop_result, result)
+    async def decide_browser_outcome(self, req, loop_result, result, session=None) -> None:
+        await self._agent.decide_browser_outcome(req, loop_result, result, session=session)
 
     def network_label(self, network: str) -> str:
         return replay_flow.network_label(network)
 
     def charge_request_matcher(self, r: CapturedRequest) -> bool:
-        return self.browser._flutterwave_charge_matcher(r)
+        return BrowserSession._flutterwave_charge_matcher(r)
 
     def verify_request_matcher(self, r: CapturedRequest) -> bool:
-        return self.browser._flutterwave_verify_matcher(r)
+        return BrowserSession._flutterwave_verify_matcher(r)
 
     def checkout_url_predicate(self, url: str) -> bool:
         """True while the URL is still on the Flutterwave checkout (not redirected)."""

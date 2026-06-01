@@ -1,12 +1,21 @@
-"""Playwright browser controller — screenshots, DOM, actions, network capture."""
+"""Playwright browser controller — screenshots, DOM, actions, network capture.
+
+Concurrency model (feature/browser-concurrency):
+  - `BrowserSession` = ONE tab + all the per-transaction state (network capture,
+    active frame, console/inflight diagnostics, event handlers). Every action and
+    snapshot lives here, so two payments running at once never corrupt each other.
+  - `BrowserController` = a POOL: it owns the Playwright `Browser` instance(s),
+    hands out isolated sessions (`acquire_session`) and reclaims them
+    (`release_session`). When a Chrome reaches `max_tabs` open tabs, a fresh Chrome
+    is launched for the next session.
+"""
 
 import base64
-import json
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Response
 
 log = logging.getLogger("ai_browser2")
 
@@ -53,53 +62,45 @@ class DomSnapshot:
     console_errors: list[str] = field(default_factory=list)
 
 
-class BrowserController:
-    """Wraps a single Playwright browser + page for the agent to drive."""
+class BrowserSession:
+    """One isolated tab + its full per-transaction state.
 
-    def __init__(self, headless: bool = False):
-        self._headless = headless
-        self._pw = None
-        self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
+    Created and owned by `BrowserController`. The reasoning loop and the runner
+    drive a session (not the global controller), so concurrent payments stay
+    isolated: each has its own captured_requests, active frame, console buffer,
+    inflight map and frame-detach counter.
+    """
+
+    def __init__(self, controller: "BrowserController", context: BrowserContext, sid: str):
+        self._controller = controller
+        self._context = context
+        self.sid = sid
         self.page: Page | None = None
+        self._active_frame = None
         # Network capture
         self.captured_requests: list[CapturedRequest] = []
         self._capture_enabled = False
+        self._capture_filter = ""
         # Console messages + network failures (for error detection)
-        self.frame_detached_count: int = 0  # incremented each time the active iframe detaches
+        self.frame_detached_count: int = 0
         self.console_messages: list[dict] = []
         self.failed_requests: list[dict] = []
         # In-flight tracking: requests started but not yet finished/failed.
-        # Used to detect assets that stall forever (form-load debugging).
         self._inflight: dict[str, dict] = {}
+        # Navigation memory
+        self._original_url: str | None = None
 
-    async def start(self):
-        self._pw = await async_playwright().start()
-        launch_kwargs = {
-            "headless": self._headless,
-            "args": ["--disable-blink-features=AutomationControlled"],
-        }
-        # In GUI mode on Windows, use installed Chrome to avoid spawn issues
-        # with Playwright's bundled Chromium.
-        if not self._headless:
-            launch_kwargs["channel"] = "chrome"
-        self._browser = await self._pw.chromium.launch(**launch_kwargs)
-        self._context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/130.0.0.0 Safari/537.36"
-            ),
-        )
+    async def open(self):
+        """Create the tab and wire every browser event to THIS session."""
         self.page = await self._new_instrumented_page()
-        log.info("Browser started (headless=%s)", self._headless)
+        self._active_frame = self.page
+        return self
 
-    async def _new_instrumented_page(self):
-        """Create a new page with ALL browser events attached.
+    async def _new_instrumented_page(self) -> Page:
+        """Create a new page with ALL browser events attached to this session.
 
-        Single place to wire events — any new page (initial or reload tab)
-        must go through here so the AI's snapshot is always complete.
+        Single place to wire events — any new page (initial or reload tab) goes
+        through here so the AI's snapshot is always complete and isolated.
         """
         page = await self._context.new_page()
         page.on("response", self._on_response)
@@ -119,7 +120,7 @@ class BrowserController:
             }
             self.console_messages.append(entry)
             if msg.type in ("error", "warning"):
-                log.info("Console[%s]: %s", msg.type, msg.text[:200])
+                log.info("[%s] Console[%s]: %s", self.sid, msg.type, msg.text[:200])
         except Exception:
             pass
 
@@ -130,7 +131,7 @@ class BrowserController:
                 "text": str(error),
                 "timestamp": time.time(),
             })
-            log.info("PageError: %s", str(error)[:200])
+            log.info("[%s] PageError: %s", self.sid, str(error)[:200])
         except Exception:
             pass
 
@@ -145,8 +146,8 @@ class BrowserController:
             }
             self.failed_requests.append(entry)
             self._inflight.pop(request.url, None)
-            log.info("RequestFailed: %s %s — %s",
-                     entry["method"], entry["url"][:100], entry["error"])
+            log.info("[%s] RequestFailed: %s %s — %s",
+                     self.sid, entry["method"], entry["url"][:100], entry["error"])
         except Exception:
             pass
 
@@ -216,7 +217,7 @@ class BrowserController:
 
     async def watch_page_changes(self):
         """Install a MutationObserver to detect page changes in real-time."""
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             await frame.evaluate("""
                 (function() {
@@ -224,7 +225,6 @@ class BrowserController:
                     window._pageWatcherInstalled = true;
                     window._pageStatus = null;
 
-                    // Watch for DOM changes
                     var lastText = (document.body.innerText || '').substring(0, 500);
                     const observer = new MutationObserver(function(mutations) {
                         var currentText = (document.body.innerText || '').substring(0, 500);
@@ -240,7 +240,6 @@ class BrowserController:
                     });
                     observer.observe(document.body, {childList: true, subtree: true, characterData: true});
 
-                    // Also watch for navigation (redirect = payment done)
                     var lastUrl = location.href;
                     setInterval(function() {
                         if (location.href !== lastUrl) {
@@ -250,13 +249,13 @@ class BrowserController:
                     }, 500);
                 })();
             """)
-            log.info("Page change watcher installed")
+            log.info("[%s] Page change watcher installed", self.sid)
         except Exception as e:
-            log.warning("Failed to install page watcher: %s", e)
+            log.warning("[%s] Failed to install page watcher: %s", self.sid, e)
 
     async def get_page_status(self) -> dict | None:
         """Check if the page watcher detected a status change."""
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             return await frame.evaluate("window._pageStatus")
         except Exception:
@@ -265,11 +264,10 @@ class BrowserController:
     async def hook_crypto(self):
         """Monkey-patch cryptico.encrypt to capture plaintext before encryption.
         Must be called AFTER the iframe content has loaded cryptico.js."""
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             await frame.evaluate("""
                 (function() {
-                    // Wait for cryptico to be available, then patch
                     function patchCryptico() {
                         if (typeof window.cryptico === 'undefined' ||
                             typeof window.cryptico.encrypt !== 'function') {
@@ -291,7 +289,6 @@ class BrowserController:
                         window._crypticoPatched = true;
                         return true;
                     }
-                    // Try immediately, then retry with interval
                     if (!patchCryptico()) {
                         var attempts = 0;
                         var timer = setInterval(function() {
@@ -303,17 +300,17 @@ class BrowserController:
                     }
                 })();
             """)
-            log.info("Crypto hook installed in active frame")
+            log.info("[%s] Crypto hook installed in active frame", self.sid)
         except Exception as e:
-            log.warning("Failed to install crypto hook: %s", e)
+            log.warning("[%s] Failed to install crypto hook: %s", self.sid, e)
 
     async def get_captured_plaintexts(self) -> list[dict]:
         """Retrieve any plaintext data captured by the crypto hook."""
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             result = await frame.evaluate("window._capturedPlaintexts || []")
             if result:
-                log.info("Captured %d plaintext payloads", len(result))
+                log.info("[%s] Captured %d plaintext payloads", self.sid, len(result))
             return result
         except Exception:
             return []
@@ -323,12 +320,12 @@ class BrowserController:
         self.captured_requests.clear()
         self._capture_filter = url_filter
         self._capture_enabled = True
-        log.info("Network capture started (filter=%s)", url_filter or "*")
+        log.info("[%s] Network capture started (filter=%s)", self.sid, url_filter or "*")
 
     def stop_capture(self) -> list[CapturedRequest]:
         """Stop capturing and return captured requests."""
         self._capture_enabled = False
-        log.info("Network capture stopped: %d requests", len(self.captured_requests))
+        log.info("[%s] Network capture stopped: %d requests", self.sid, len(self.captured_requests))
         return self.captured_requests.copy()
 
     def get_charge_request(self, matcher: Callable[[CapturedRequest], bool]) -> CapturedRequest | None:
@@ -374,10 +371,8 @@ class BrowserController:
         request = response.request
         url = request.url
 
-        # Apply filter
-        if hasattr(self, '_capture_filter') and self._capture_filter:
-            if self._capture_filter not in url:
-                return
+        if self._capture_filter and self._capture_filter not in url:
+            return
 
         cap = CapturedRequest()
         cap.url = url
@@ -407,22 +402,14 @@ class BrowserController:
             cap.response_body = ""
 
         self.captured_requests.append(cap)
-        log.info("Captured: %s %s [%d] body=%d",
-                 cap.method, cap.url[:100], cap.status, len(cap.response_body))
-
-    async def stop(self):
-        if self._browser:
-            await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
-        log.info("Browser stopped")
+        log.info("[%s] Captured: %s %s [%d] body=%d",
+                 self.sid, cap.method, cap.url[:100], cap.status, len(cap.response_body))
 
     async def goto(self, url: str, wait_until: str = "domcontentloaded"):
         """Navigate to a URL."""
-        log.info("Navigating to %s", url)
+        log.info("[%s] Navigating to %s", self.sid, url)
         self._original_url = url  # Keep the full URL (before redirects)
         await self.page.goto(url, wait_until=wait_until, timeout=30000)
-        # Reset active frame to main page
         self._active_frame = self.page
 
     async def reload_payment(self):
@@ -431,16 +418,12 @@ class BrowserController:
 
         Much more reliable than page.reload() because Flutterwave's checkout
         sometimes gets stuck on its internal loader after a reload."""
-        # Use the ORIGINAL payment URL (with the token), not the current URL
-        # which may have been stripped by Flutterwave's redirect.
-        url = getattr(self, '_original_url', None) or self.page.url
-        log.info("Action: reload_payment — opening new tab for %s", url)
+        url = self._original_url or self.page.url
+        log.info("[%s] Action: reload_payment — opening new tab for %s", self.sid, url)
 
         try:
-            # Open a fresh tab with the same URL
             new_page = await self._new_instrumented_page()
 
-            # Close the old stuck tab
             old_page = self.page
             self.page = new_page
             self._active_frame = new_page
@@ -449,25 +432,23 @@ class BrowserController:
             except Exception:
                 pass
 
-            # Navigate in the new tab
             await new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await new_page.wait_for_timeout(5000)
 
-            # Re-enter iframe and wait for the actual form
             for _ in range(3):
                 try:
                     await self.enter_iframe("iframe")
-                    frame = getattr(self, '_active_frame', self.page)
+                    frame = self._active_frame or self.page
                     await frame.wait_for_selector("#phone", timeout=10000)
                     await self.hook_crypto()
-                    log.info("reload_payment: form ready in new tab")
+                    log.info("[%s] reload_payment: form ready in new tab", self.sid)
                     return True
                 except Exception as e:
-                    log.warning("reload_payment re-enter attempt: %s", e)
+                    log.warning("[%s] reload_payment re-enter attempt: %s", self.sid, e)
                     self._active_frame = self.page
                     await self.page.wait_for_timeout(3000)
         except Exception as e:
-            log.warning("reload_payment new tab failed: %s", e)
+            log.warning("[%s] reload_payment new tab failed: %s", self.sid, e)
 
         return False
 
@@ -477,9 +458,9 @@ class BrowserController:
         frame = await handle.content_frame()
         if frame:
             self._active_frame = frame
-            log.info("Entered iframe: %s", selector)
+            log.info("[%s] Entered iframe: %s", self.sid, selector)
             return True
-        log.warning("Could not enter iframe: %s", selector)
+        log.warning("[%s] Could not enter iframe: %s", self.sid, selector)
         return False
 
     async def snapshot(self, max_html: int = 100_000) -> DomSnapshot:
@@ -487,28 +468,25 @@ class BrowserController:
         snap = DomSnapshot()
         snap.url = self.page.url
 
-        # Screenshot as base64 PNG
         screenshot_bytes = await self.page.screenshot(full_page=False)
         snap.screenshot_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
 
         # Try active frame first, fall back to page if frame is detached
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             html = await frame.content()
         except Exception:
             # Frame was detached/navigated — re-enter iframe or use main page
             self.frame_detached_count += 1
-            log.warning("Active frame detached, re-entering iframe")
+            log.warning("[%s] Active frame detached, re-entering iframe", self.sid)
             try:
                 await self.enter_iframe("iframe")
                 frame = self._active_frame
-                # Wait for actual content, not just the loader
                 try:
                     await frame.wait_for_selector("#phone", timeout=8000)
                 except Exception:
                     pass
                 html = await frame.content()
-                # Re-install crypto hook in new frame
                 await self.hook_crypto()
             except Exception:
                 frame = self.page
@@ -530,7 +508,6 @@ class BrowserController:
         except Exception:
             snap.page_outer_html = ""
 
-        # Interactive elements from active frame
         snap.interactive_elements = await self._get_interactive_elements()
         snap.frame_detached_count = self.frame_detached_count
 
@@ -540,8 +517,6 @@ class BrowserController:
             {"type": p.get("resource_type", ""), "url": p["url"][-80:], "age_s": p["age_s"]}
             for p in pending[:10]
         ]
-        # Dernières réponses HTTP — body complet pour les requêtes importantes
-        # (charge, verify, payment-done), tronqué pour les assets statiques.
         _ASSET_EXTS = (".js", ".css", ".png", ".svg", ".ttf", ".woff", ".ico")
         snap.recent_responses = [
             {
@@ -553,7 +528,6 @@ class BrowserController:
             }
             for r in self.captured_requests[-20:]
         ]
-        # Requêtes échouées (DNS/abort/timeout)
         snap.failed_requests = [
             {"method": f.get("method", ""), "url": f["url"][-100:], "error": f.get("error", "")}
             for f in list(self.failed_requests)[-5:]
@@ -593,43 +567,137 @@ class BrowserController:
             return results;
         })()
         """
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         try:
             return await frame.evaluate(js)
         except Exception as e:
-            log.warning("Failed to get interactive elements: %s", e)
+            log.warning("[%s] Failed to get interactive elements: %s", self.sid, e)
             return []
 
     # ---- Actions the AI agent can call ----
 
     async def click(self, selector: str):
-        frame = getattr(self, '_active_frame', self.page)
-        log.info("Action: click(%s)", selector)
+        frame = self._active_frame or self.page
+        log.info("[%s] Action: click(%s)", self.sid, selector)
         await frame.click(selector, timeout=10000)
 
     async def fill(self, selector: str, value: str):
-        frame = getattr(self, '_active_frame', self.page)
-        log.info("Action: fill(%s, %s)", selector, value)
+        frame = self._active_frame or self.page
+        log.info("[%s] Action: fill(%s, %s)", self.sid, selector, value)
         await frame.fill(selector, value, timeout=10000)
 
     async def select(self, selector: str, value: str):
-        frame = getattr(self, '_active_frame', self.page)
-        log.info("Action: select(%s, %s)", selector, value)
+        frame = self._active_frame or self.page
+        log.info("[%s] Action: select(%s, %s)", self.sid, selector, value)
         await frame.select_option(selector, value, timeout=10000)
 
     async def scroll(self, pixels: int = 500):
-        frame = getattr(self, '_active_frame', self.page)
-        log.info("Action: scroll(%d)", pixels)
+        frame = self._active_frame or self.page
+        log.info("[%s] Action: scroll(%d)", self.sid, pixels)
         await frame.evaluate(f"window.scrollBy(0, {pixels})")
 
     async def wait(self, selector: str | None = None, ms: int = 2000):
-        frame = getattr(self, '_active_frame', self.page)
+        frame = self._active_frame or self.page
         if selector:
-            log.info("Action: wait for %s", selector)
+            log.info("[%s] Action: wait for %s", self.sid, selector)
             await frame.wait_for_selector(selector, timeout=ms)
         else:
-            log.info("Action: wait %dms", ms)
+            log.info("[%s] Action: wait %dms", self.sid, ms)
             await frame.wait_for_timeout(ms)
 
     async def current_url(self) -> str:
         return self.page.url
+
+    async def close(self):
+        """Close this session's tab (the controller calls this on release)."""
+        try:
+            if self.page:
+                await self.page.close()
+        except Exception:
+            pass
+
+
+class BrowserController:
+    """Pool of Chrome instances handing out isolated `BrowserSession`s.
+
+    Owns the Playwright runtime and one or more `Browser` instances. Each Chrome
+    holds up to `max_tabs` open tabs; once full, a new Chrome is launched for the
+    next session. Sessions are isolated so concurrent payments never collide.
+    """
+
+    def __init__(self, headless: bool = False, max_tabs: int = 20):
+        self._headless = headless
+        self.max_tabs = max_tabs
+        self._pw = None
+        # Each pool entry: {"browser": Browser, "context": BrowserContext, "open": int}
+        self._browsers: list[dict] = []
+        self._sid_counter = 0
+
+    async def start(self):
+        """Launch the first Chrome so the service is ready at boot."""
+        self._pw = await async_playwright().start()
+        await self._launch_browser()
+        log.info("Browser pool started (headless=%s, max_tabs=%d)",
+                 self._headless, self.max_tabs)
+
+    async def _launch_browser(self) -> dict:
+        launch_kwargs = {
+            "headless": self._headless,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        # In GUI mode, use installed Chrome to avoid spawn issues with the
+        # bundled Chromium.
+        if not self._headless:
+            launch_kwargs["channel"] = "chrome"
+        browser = await self._pw.chromium.launch(**launch_kwargs)
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+        )
+        entry = {"browser": browser, "context": context, "open": 0}
+        self._browsers.append(entry)
+        log.info("Launched Chrome #%d (pool size=%d)", len(self._browsers), len(self._browsers))
+        return entry
+
+    async def acquire_session(self) -> BrowserSession:
+        """Open an isolated tab for one transaction.
+
+        Picks a Chrome with spare capacity (< max_tabs open tabs); launches a new
+        Chrome if all current ones are full.
+        """
+        entry = next((b for b in self._browsers if b["open"] < self.max_tabs), None)
+        if entry is None:
+            entry = await self._launch_browser()
+        self._sid_counter += 1
+        sid = f"s{self._sid_counter}"
+        session = BrowserSession(self, entry["context"], sid)
+        session._pool_entry = entry
+        await session.open()
+        entry["open"] += 1
+        log.info("[%s] Session acquise (Chrome a %d/%d onglets)",
+                 sid, entry["open"], self.max_tabs)
+        return session
+
+    async def release_session(self, session: BrowserSession):
+        """Close the session's tab and free its slot in the pool."""
+        await session.close()
+        entry = getattr(session, "_pool_entry", None)
+        if entry is not None:
+            entry["open"] = max(0, entry["open"] - 1)
+            log.info("[%s] Session libérée (Chrome a %d/%d onglets)",
+                     session.sid, entry["open"], self.max_tabs)
+
+    async def stop(self):
+        for entry in self._browsers:
+            try:
+                await entry["browser"].close()
+            except Exception:
+                pass
+        self._browsers.clear()
+        if self._pw:
+            await self._pw.stop()
+        log.info("Browser pool stopped")

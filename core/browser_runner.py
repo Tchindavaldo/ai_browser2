@@ -29,8 +29,30 @@ async def run_browser_flow(
     *,
     max_turns: int = 22,
 ) -> PaymentResult:
-    """Drive the full AI checkout for `aggregator` and return a PaymentResult."""
-    browser = aggregator.browser
+    """Drive the full AI checkout for `aggregator` and return a PaymentResult.
+
+    Acquires an isolated `BrowserSession` (its own tab + network capture + active
+    frame) from the controller's pool so concurrent payments never collide, and
+    releases it when done.
+    """
+    llm = aggregator.llm
+    result = PaymentResult()
+
+    # 0. Acquire an isolated browser session (one tab) for THIS transaction.
+    browser = await aggregator.browser.acquire_session()
+    try:
+        return await _run_browser_flow_in_session(aggregator, req, browser, max_turns)
+    finally:
+        await aggregator.browser.release_session(browser)
+
+
+async def _run_browser_flow_in_session(
+    aggregator: Aggregator,
+    req: PaymentRequest,
+    browser,  # BrowserSession
+    max_turns: int,
+) -> PaymentResult:
+    """Body of the flow, running entirely on one isolated session."""
     llm = aggregator.llm
     result = PaymentResult()
 
@@ -141,7 +163,8 @@ async def run_browser_flow(
         log.warning("No plaintext captured from crypto hook")
 
     # 6. Aggregator-specific outcome decision (USSD watch, classifier, LLM...).
-    await aggregator.decide_browser_outcome(req, loop_result, result)
+    #    Pass THIS session so the outcome reads the right tab's capture/page.
+    await aggregator.decide_browser_outcome(req, loop_result, result, session=browser)
 
     # 7. Capture charge + verify requests (the deduced curl replay).
     charge_req = browser.get_charge_request(aggregator.charge_request_matcher)
@@ -157,6 +180,17 @@ async def run_browser_flow(
         result.verify_request_body = last_verify.request_body
         result.verify_last_response = last_verify.response_body[:1000]
         result.verify_curl = last_verify.to_curl()
+
+    # Build the reusable curl template now, while we still hold the session's
+    # captured requests (the session is released as soon as the flow returns).
+    # /pay persists it from result.curl_template.
+    if charge_req:
+        try:
+            result.curl_template = aggregator.extract_curl_template(
+                charge_req, verify_reqs[-1] if verify_reqs else None, result.public_key
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("extract_curl_template failed: %s", e)
 
     captured = browser.stop_capture()
     result.captured_requests = [
