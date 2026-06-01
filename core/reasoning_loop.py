@@ -272,6 +272,32 @@ class ReasoningLoop:
 
         frame_info = (f" | iframe s'est détachée {snap.frame_detached_count}x"
                       if snap.frame_detached_count > 0 else "")
+        # Fait observable: Payer a-t-il déjà été cliqué ? Deux preuves —
+        #  (a) un POST /charge dans les réponses réseau (paiement réellement parti),
+        #  (b) un clic submit/Payer réussi dans l'historique d'actions (même AVANT
+        #      que le /charge n'apparaisse — c'est le cas qui causait le double-clic).
+        # Si l'une est vraie, on l'affiche en gros pour que l'IA NE recharge PAS.
+        # Le code ne décide pas, il rapporte le fait.
+        charge_sent = any(
+            r.get("method") == "POST" and "/charge" in r.get("url", "")
+            for r in snap.recent_responses
+        )
+        pay_clicked = any(
+            ("click" in a.lower()) and ("[OK]" in a)
+            and ("submit" in a.lower() or "btn" in a.lower()
+                 or "payer" in a.lower() or "pay" in a.lower())
+            for a in self.action_history
+        )
+        charge_info = ""
+        if charge_sent or pay_clicked:
+            charge_info = (
+                "\n\n⚠️ PAIEMENT DÉJÀ SOUMIS: tu as déjà cliqué Payer (voir "
+                "HISTORIQUE D'ACTIONS / appel /charge). NE RECHARGE PAS, ne "
+                "re-remplis pas, ne re-clique pas Payer — tu enverrais un 2e "
+                "paiement (double débit). Le formulaire disparaît et un loader "
+                "s'affiche: c'est NORMAL. ATTENDS (wait) et LIS le résultat "
+                "(USSD #150*50#, succès, ou échec)."
+            )
         deadline_info = ""
         if snap.deadline_exceeded:
             mins = int(snap.elapsed_s // 60)
@@ -284,7 +310,7 @@ class ReasoningLoop:
                 f"validation dépassé ({mins} min) — transaction non confirmée à temps\"}}."
             )
         text = (
-            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}{deadline_info}\n\n"
+            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}{charge_info}{deadline_info}\n\n"
             f"OBJECTIF: {objective}\n\n"
             f"URL ACTUELLE: {snap.url}"
             f"{url_history_str}"
