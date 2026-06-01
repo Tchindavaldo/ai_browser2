@@ -80,11 +80,20 @@ def interpret_charge(resp: dict, network: str) -> tuple[str, str] | None:
             err_tx = data.get("err_tx", {})
             rc = err_tx.get("chargeResponseCode", "") if isinstance(err_tx, dict) else ""
             flw_msg = resp.get("message", "")
-            # Build the clear message
+            low = f"{code} {rc} {flw_msg}".lower()
+            # Solde insuffisant (code 51) = problème de compte, PAS réseau.
+            if rc == "51" or "insufficient" in low or "solde insuffisant" in low:
+                return "failed", (
+                    f"Solde insuffisant sur le compte {network_label(network)}. "
+                    f"Veuillez recharger puis réessayer."
+                )
+            # Sinon, échec au stade /charge (avant tout USSD) = réseau opérateur
+            # dérangé. Statut 'network_down' (aligné avec le moteur navigateur)
+            # pour que /pay renvoie un 503 operator_unavailable cohérent.
             msg = (f"Le réseau {network_label(network)} est actuellement dérangé. "
                    f"Veuillez réessayer avec {alt_network(network)}.")
             detail = f" [code={code}, chargeResponseCode={rc}, message={flw_msg}]"
-            return "failed", msg + detail
+            return "network_down", msg + detail
     return None
 
 

@@ -24,7 +24,9 @@ from core.config import settings
 from core.db import db
 from core.error_tracking import build_errors
 from core.llm_client import LlmClient, LlmConfig
-from core.upstream_errors import NETWORK_UNAVAILABLE, NETWORK_UNAVAILABLE_MESSAGE
+from core.upstream_errors import (
+    NETWORK_UNAVAILABLE, OPERATOR_UNAVAILABLE, UPSTREAM_CODES, UPSTREAM_MESSAGES,
+)
 from core import registry
 
 logging.basicConfig(
@@ -325,7 +327,7 @@ async def pay(req: PayRequest):
         # (panne API amont, erreur serveur avant déclenchement). Ils ne bloquent
         # PAS le numéro — sinon une panne réseau gèlerait le client 17 min pour
         # rien. Seul un échec RÉEL (failed/cancelled) déclenche la fenêtre retry.
-        _NON_ATTEMPTED = (NETWORK_UNAVAILABLE, "unknown", "error", "")
+        _NON_ATTEMPTED = (NETWORK_UNAVAILABLE, OPERATOR_UNAVAILABLE, "unknown", "error", "")
         if status not in ("successful", "completed", "success") and status not in _NON_ATTEMPTED:
             elapsed = _seconds_since(last.get("created_at"))
             if elapsed is not None and elapsed < settings.retry_window_s:
@@ -409,25 +411,33 @@ async def pay(req: PayRequest):
             result = PaymentResult()
             result.final_status = "error"
             result.final_message = "Paiement interrompu (erreur serveur)."
-        # Panne amont (API agrégateur down) : la transaction n'a JAMAIS atteint
-        # l'opérateur — on la marque 'network_unavailable' pour que la garde
-        # anti-doublon ne bloque PAS le numéro (rien n'a été déclenché).
-        if result.error_code == NETWORK_UNAVAILABLE:
-            result.final_status = NETWORK_UNAVAILABLE
-            result.final_message = NETWORK_UNAVAILABLE_MESSAGE
+        # Réseau opérateur (Orange/MTN) dérangé au /charge, AVANT tout USSD :
+        # même traitement qu'une panne amont — la transaction n'a pas atteint
+        # l'utilisateur, on l'expose comme 'operator_unavailable'. Vaut pour les
+        # DEUX moteurs (browser conclut 'network_down', replay aussi).
+        if not result.error_code and result.final_status == "network_down":
+            result.error_code = OPERATOR_UNAVAILABLE
+        # Panne amont (API down) OU opérateur down : la transaction n'a JAMAIS
+        # abouti côté opérateur — on aligne le statut sur le code pour que la
+        # garde anti-doublon ne bloque PAS le numéro (rien de débité).
+        if result.error_code in UPSTREAM_CODES:
+            result.final_status = result.error_code
+            result.final_message = UPSTREAM_MESSAGES[result.error_code]
         # Dérive les erreurs détaillées (table transaction_errors) depuis le
         # verdict, en distinguant le moteur et la source (ai/browser/transaction).
         result.errors = build_errors(result, engine_used)
         await db.update_transaction(tx_id, result)
 
-    # API agrégateur amont en panne (503/timeout/réseau) : on a tracé le détail
-    # en BD + logs ci-dessus ; au dev intégrateur on renvoie un 503 propre avec
-    # un code stable + message FR, SANS exposer l'URL interne ni la stacktrace.
-    if result.error_code == NETWORK_UNAVAILABLE:
-        log.warning("Upstream indisponible (tx_id=%s): %s", tx_id, result.error)
+    # Panne amont (API agrégateur OU réseau opérateur) : on a tracé le détail en
+    # BD + logs ci-dessus ; au dev intégrateur on renvoie un 503 propre avec un
+    # code stable + message FR, SANS exposer l'URL interne ni la stacktrace. Même
+    # forme de réponse quel que soit le moteur (browser/replay) et le type de panne.
+    if result.error_code in UPSTREAM_CODES:
+        log.warning("Upstream indisponible (tx_id=%s, code=%s): %s",
+                    tx_id, result.error_code, result.error or result.final_message)
         raise HTTPException(
             503,
-            {"code": NETWORK_UNAVAILABLE, "message": NETWORK_UNAVAILABLE_MESSAGE},
+            {"code": result.error_code, "message": UPSTREAM_MESSAGES[result.error_code]},
         )
 
     return PayResponse(
