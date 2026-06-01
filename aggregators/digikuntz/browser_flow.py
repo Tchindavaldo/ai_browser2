@@ -42,13 +42,23 @@ class DigikuntzAgent:
             f"5. Attends 5 secondes et lis le resultat\n\n"
             f"IMPORTANT:\n"
             f"- Si le bouton Pay est disabled, c'est que le reseau n'est pas selectionne. Selectionne-le d'abord.\n"
+            f"- IFRAME DETACHEE (frame_detached_count > 0 dans le header du tour): "
+            f"si tu vois 'iframe s est detachee Nx' dans le header de ton tour ET que "
+            f"0 elements interactifs ET que v3/checkout/initialize a deja reussi, "
+            f"RECHARGE IMMEDIATEMENT sans attendre — le formulaire n apparaitra jamais "
+            f"dans ce cas car Vue.js a demarré dans un état corrompu.\n"
+            f"- COMMENT SAVOIR SI LE FORMULAIRE VA APPARAITRE: si l iframe ne s est PAS "
+            f"detachee, regarde les DERNIERES REPONSES HTTP. Si tu vois "
+            f"'v3/checkout/initialize' [200] et scripts en cours, attends 3-5s. "
+            f"Si tu vois 'v3/checkout/initialize' [200] ET plus aucun script en cours "
+            f"ET toujours 0 elements apres 10s d attente — recharge.\n"
             f"- ERREURS DE CHARGEMENT = RECUPERABLES, JAMAIS un echec final: si tu vois "
             f"'Impossible de recuperer les reseaux', un loader bloque, un select reseau "
-            f"vide, ou une erreur reseau AVANT d'avoir clique Payer, tu n'as PAS encore "
-            f"paye. Tu dois trouver une solution toi-meme pour pouvoir payer:\n"
+            f"vide, ou une erreur reseau AVANT d'avoir clique Payer, ET qu'il n'y a plus "
+            f"de requetes en cours, tu n'as PAS encore paye. Solutions:\n"
             f"    a) attends quelques secondes (action wait) puis reverifie le select reseau,\n"
-            f"    b) si toujours vide/en erreur, recharge la page de paiement (action "
-            f"\"reload\") pour relancer le checkout, puis recommence depuis l'etape 1,\n"
+            f"    b) si toujours vide/en erreur apres attente ET aucune requete en cours, "
+            f"recharge la page de paiement (action \"reload\"), puis recommence depuis l'etape 1,\n"
             f"    c) repete (attendre / recharger) 2 a 3 fois MAXIMUM. Si apres 3 reloads le "
             f"formulaire ne s'affiche toujours pas (0 elements interactifs, loader en boucle), "
             f"ARRETE et conclus: objective_reached=true avec objective_result "
@@ -71,9 +81,14 @@ class DigikuntzAgent:
             f"d'authentification — session de paiement perdue\"}}.\n"
             f"- Ne perds jamais de vue ton objectif: payer via mobile money. Tu ne "
             f"dois JAMAIS creer de compte ni te connecter.\n\n"
-            f"L'objectif est ATTEINT quand tu vois le resultat apres Pay "
-            f"(succes, erreur, USSD prompt, ou redirection). "
-            f"Dans objective_result, mets un JSON: "
+            f"L'objectif est ATTEINT dans l'un de ces cas — agis IMMEDIATEMENT:\n"
+            f"  a) Tu vois '#150*50#' ou 'USSD' ou 'dial' apres le clic Payer → ussd_sent\n"
+            f"  b) La page affiche un message de succes ou echec apres Payer → success ou error\n"
+            f"  c) L'URL de la page principale (pas l'iframe) contient 'payment-done' ou "
+            f"'payments.digikuntz.com' → c'est la page de resultat DigiKUNTZ, LIS son contenu "
+            f"(status=failed/success dans l'URL ou le texte) et conclus IMMEDIATEMENT\n"
+            f"  d) Tu es redirige vers une page inconnue apres Payer → conclus avec ce que tu vois\n\n"
+            f"Dans objective_result, mets toujours un JSON: "
             f"{{\"final_url\": \"...\", \"status\": \"success|error|ussd_sent|pending\", "
             f"\"message\": \"ce qui est affiche a l'ecran\"}}"
         )
@@ -90,9 +105,30 @@ class DigikuntzAgent:
         agent_message = ""
         if loop_result.success and loop_result.result:
             try:
-                agent_result = json.loads(loop_result.result)
+                agent_result = json.loads(loop_result.result) if isinstance(loop_result.result, str) else loop_result.result
                 agent_status = agent_result.get("status", "unknown")
                 agent_message = agent_result.get("message", "")
+                # URL guard redirect: extract real status from payment-done URL.
+                final_url = agent_result.get("final_url", "")
+                if agent_status == "redirected" and "payment-done" in final_url:
+                    from urllib.parse import urlparse, parse_qs
+                    qs = parse_qs(urlparse(final_url).query)
+                    url_status = qs.get("status", ["unknown"])[0]
+                    tx_ref = qs.get("tx_ref", [""])[0]
+                    if url_status == "successful":
+                        result.final_status = "successful"
+                        result.final_message = "Paiement reussi."
+                    elif url_status == "failed":
+                        result.final_status = "failed"
+                        result.final_message = "Paiement échoué (solde insuffisant ou refus opérateur)."
+                    else:
+                        result.final_status = url_status or "unknown"
+                        result.final_message = f"Redirection payment-done: status={url_status}"
+                    if tx_ref and not result.transaction_id:
+                        result.transaction_id = tx_ref
+                    result.payment_status = result.final_status
+                    log.info("URL guard: payment-done status=%s tx_ref=%s", url_status, tx_ref)
+                    return
             except (json.JSONDecodeError, Exception):
                 pass
 
@@ -126,14 +162,22 @@ class DigikuntzAgent:
         charge_body = charge_req.response_body if charge_req else ""
         signals_text = json.dumps(error_signals, ensure_ascii=False) if has_error_signal else ""
 
+        # Si l'IA a déjà conclu avec un statut définitif (elle a vu payment-done,
+        # un message d'echec/succes clair), on respecte sa conclusion sans entrer
+        # dans le watch USSD — l'IA a la vision complète, le code ne la contourne pas.
+        agent_concluded = agent_status in ("error", "failed", "success", "cancelled")
+        if agent_concluded:
+            log.info("Agent a conclu status=%s — skip USSD watch", agent_status)
+
         # USSD can also be inferred from the /charge response body (e.g. "dial").
-        if not ussd_detected:
+        # Mais seulement si l'IA n'a pas déjà conclu définitivement.
+        if not ussd_detected and not agent_concluded:
             cb_hit = classifier.classify(charge_body)
             if cb_hit and cb_hit[0] == "ussd_sent":
                 ussd_detected = True
                 log.info("USSD inferred from charge response (%r)", cb_hit[1])
 
-        if ussd_detected:
+        if ussd_detected and not agent_concluded:
             log.info("USSD sent! Watching for page change (react on change, no fixed wait)...")
             await self.browser.watch_page_changes()
             for i in range(60):  # safety cap 60s, but we break the instant anything changes
@@ -197,8 +241,11 @@ class DigikuntzAgent:
                 status, kw, src = decided
                 log.info("Keyword %r matched -> %s", kw, status)
                 result.final_status = status
+                # Use the authoritative source text (the one that matched the
+                # keyword) as context for _friendly, NOT agent_message which
+                # may be a generic "loader error" unrelated to the real cause.
                 result.final_message = self._friendly(
-                    status, req.network, (agent_message or src)[:300]
+                    status, req.network, src[:300]
                 )
             else:
                 # Nothing matched any known keyword -> ask the LLM on the
@@ -221,12 +268,12 @@ class DigikuntzAgent:
                   ussd_sent: bool = False) -> str:
         """Produce a clear user-facing message.
 
-        The SAME 'failed' status means different things depending on whether
-        the USSD prompt was already sent:
-          - failure BEFORE any USSD (at /charge)  -> operator/network problem
-            -> name the network and suggest the alternative.
-          - failure AFTER the USSD was sent        -> the user refused or had
-            insufficient funds -> do NOT blame the network.
+        The SAME 'failed' status means different things:
+          - insufficient funds (code 51 / "solde insuffisant" / "Insufficient
+            Fund") -> tell the user to top up, whether or not USSD was sent.
+          - other failure AFTER the USSD was sent -> refusal by the user.
+          - other failure BEFORE any USSD (at /charge) -> operator/network
+            problem -> name the network and suggest the alternative.
         """
         if status == "successful":
             return "Paiement reussi."
@@ -235,6 +282,14 @@ class DigikuntzAgent:
         if status == "network_down":
             return classifier.network_failure_message(network)
         if status == "failed":
+            low = (raw or "").lower()
+            # Insufficient funds is a balance issue, never a network problem.
+            if ("insufficient" in low or "solde insuffisant" in low
+                    or "insufficient fund" in low or '"51"' in low
+                    or "chargeresponsecode\":\"51" in low):
+                return ("Solde insuffisant sur le compte "
+                        f"{classifier.network_label(network)}. "
+                        "Veuillez recharger puis reessayer.")
             if ussd_sent:
                 return ("Paiement echoue apres le USSD (refus de l'utilisateur "
                         "ou solde insuffisant). Veuillez reessayer.")

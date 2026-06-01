@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 # Importing the aggregators package registers all aggregators in the registry.
 import aggregators.digikuntz  # noqa: F401
-from core.base import CurlTemplate, PaymentRequest
+from core.base import CurlTemplate, PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.config import settings
 from core.db import db
@@ -29,6 +29,11 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     stream=sys.stdout,
 )
+# Quiet the noisy third-party loggers so the AI workflow stands out in the
+# console. Each HTTP call to DeepSeek/Supabase and every access line used to
+# drown the agent's thoughts/actions.
+for noisy in ("httpx", "httpcore", "uvicorn.access", "hpack", "openai"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("ai_browser2")
 
 # Global state
@@ -353,6 +358,50 @@ async def transaction_status(transaction_ref: str):
     if tx is None:
         raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
     return tx
+
+
+@app.get(
+    "/transactions/{transaction_ref}/trace",
+    tags=["transactions"],
+    summary="Trace IA d'une transaction (mode browser)",
+    responses={404: {"description": "Aucune transaction pour cette référence."}},
+)
+async def transaction_trace(transaction_ref: str):
+    """Renvoie la trace tour-par-tour de l'agent IA pour une transaction browser.
+
+    Chaque entrée : ce que l'IA a vu (url, nb d'éléments), sa pensée, les actions
+    jouées, et si l'objectif a été atteint. Vide pour un paiement en mode replay.
+    """
+    tx = await db.get_transaction(transaction_ref)
+    if tx is None:
+        raise HTTPException(404, f"No transaction found for ref '{transaction_ref}'")
+    traces = await db.get_traces(tx["id"])
+    return {"transaction_ref": transaction_ref, "turns": len(traces), "trace": traces}
+
+
+@app.post(
+    "/transactions/{tx_id}/cancel",
+    tags=["transactions"],
+    summary="Débloquer une transaction pending",
+    responses={
+        404: {"description": "Aucune transaction 'pending' avec cet id."},
+        503: {"description": "Supabase non configuré."},
+    },
+)
+async def cancel_transaction(tx_id: int):
+    """Force une transaction restée **pending** à **cancelled**.
+
+    Sert à débloquer une transaction coincée (ex: serveur interrompu avant le
+    verdict) qui empêcherait un nouveau paiement sur le même numéro
+    (`409 pending_exists`). N'agit que sur une ligne encore `pending` — ne
+    réécrit jamais un verdict déjà acté.
+    """
+    if not db.enabled:
+        raise HTTPException(503, "Supabase non configuré.")
+    row = await db.cancel_pending(tx_id)
+    if row is None:
+        raise HTTPException(404, f"Aucune transaction 'pending' avec l'id {tx_id}.")
+    return {"cancelled": row}
 
 
 class TemplateBody(BaseModel):

@@ -38,9 +38,18 @@ class CapturedRequest:
 @dataclass
 class DomSnapshot:
     url: str = ""
-    outer_html: str = ""
+    outer_html: str = ""           # DOM du frame actif (iframe si on est dedans)
+    page_outer_html: str = ""      # DOM de la page principale (toujours présent)
     screenshot_b64: str = ""
     interactive_elements: list[dict] = field(default_factory=list)
+    url_history: list[str] = field(default_factory=list)   # URLs visitées depuis le début
+    elapsed_s: float = 0.0                                  # secondes depuis le début du loop
+    frame_detached_count: int = 0  # combien de fois l'iframe s'est détachée depuis le début
+    # Réseau — vision complète comme DevTools
+    pending_requests: list[dict] = field(default_factory=list)
+    recent_responses: list[dict] = field(default_factory=list)
+    failed_requests: list[dict] = field(default_factory=list)
+    console_errors: list[str] = field(default_factory=list)
 
 
 class BrowserController:
@@ -56,8 +65,12 @@ class BrowserController:
         self.captured_requests: list[CapturedRequest] = []
         self._capture_enabled = False
         # Console messages + network failures (for error detection)
+        self.frame_detached_count: int = 0  # incremented each time the active iframe detaches
         self.console_messages: list[dict] = []
         self.failed_requests: list[dict] = []
+        # In-flight tracking: requests started but not yet finished/failed.
+        # Used to detect assets that stall forever (form-load debugging).
+        self._inflight: dict[str, dict] = {}
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -78,15 +91,23 @@ class BrowserController:
                 "Chrome/130.0.0.0 Safari/537.36"
             ),
         )
-        self.page = await self._context.new_page()
-        # Set up network interception
-        self.page.on("response", self._on_response)
-        # Capture console logs (errors, warnings) — works across iframes
-        self.page.on("console", self._on_console)
-        self.page.on("pageerror", self._on_page_error)
-        # Capture failed network requests (DNS/timeout/refused/aborted)
-        self.page.on("requestfailed", self._on_request_failed)
+        self.page = await self._new_instrumented_page()
         log.info("Browser started (headless=%s)", self._headless)
+
+    async def _new_instrumented_page(self):
+        """Create a new page with ALL browser events attached.
+
+        Single place to wire events — any new page (initial or reload tab)
+        must go through here so the AI's snapshot is always complete.
+        """
+        page = await self._context.new_page()
+        page.on("response", self._on_response)
+        page.on("console", self._on_console)
+        page.on("pageerror", self._on_page_error)
+        page.on("requestfailed", self._on_request_failed)
+        page.on("request", self._on_request_started)
+        page.on("requestfinished", self._on_request_finished)
+        return page
 
     def _on_console(self, msg):
         try:
@@ -122,10 +143,42 @@ class BrowserController:
                 "timestamp": time.time(),
             }
             self.failed_requests.append(entry)
+            self._inflight.pop(request.url, None)
             log.info("RequestFailed: %s %s — %s",
                      entry["method"], entry["url"][:100], entry["error"])
         except Exception:
             pass
+
+    def _on_request_started(self, request):
+        try:
+            self._inflight[request.url] = {
+                "url": request.url,
+                "method": request.method,
+                "resource_type": request.resource_type,
+                "started_at": time.time(),
+            }
+        except Exception:
+            pass
+
+    def _on_request_finished(self, request):
+        try:
+            self._inflight.pop(request.url, None)
+        except Exception:
+            pass
+
+    def get_pending_requests(self, min_age_s: float = 0.0) -> list[dict]:
+        """Requests started but never finished/failed (stalled assets).
+
+        `min_age_s` filters to those in flight for at least that long — useful
+        to flag truly stuck assets (e.g. JS bundles) vs requests just started.
+        """
+        now = time.time()
+        out = []
+        for entry in self._inflight.values():
+            age = now - entry["started_at"]
+            if age >= min_age_s:
+                out.append({**entry, "age_s": round(age, 1)})
+        return sorted(out, key=lambda e: e["age_s"], reverse=True)
 
     def reset_diagnostics(self):
         """Clear console + failed-request buffers (call before clicking Pay)."""
@@ -384,11 +437,7 @@ class BrowserController:
 
         try:
             # Open a fresh tab with the same URL
-            new_page = await self._context.new_page()
-            new_page.on("response", self._on_response)
-            new_page.on("console", self._on_console)
-            new_page.on("pageerror", self._on_page_error)
-            new_page.on("requestfailed", self._on_request_failed)
+            new_page = await self._new_instrumented_page()
 
             # Close the old stuck tab
             old_page = self.page
@@ -447,6 +496,7 @@ class BrowserController:
             html = await frame.content()
         except Exception:
             # Frame was detached/navigated — re-enter iframe or use main page
+            self.frame_detached_count += 1
             log.warning("Active frame detached, re-entering iframe")
             try:
                 await self.enter_iframe("iframe")
@@ -468,8 +518,49 @@ class BrowserController:
             html = html[:max_html] + "\n<!-- truncated -->"
         snap.outer_html = html
 
+        # DOM de la page principale (toujours, même quand on est dans un iframe).
+        # Critique quand la page redirige vers payment-done : l'IA voit le texte
+        # "failed"/"success" affiché là, pas seulement l'URL.
+        try:
+            page_html = await self.page.content()
+            if len(page_html) > 8000:
+                page_html = page_html[:8000] + "\n<!-- truncated -->"
+            snap.page_outer_html = page_html
+        except Exception:
+            snap.page_outer_html = ""
+
         # Interactive elements from active frame
         snap.interactive_elements = await self._get_interactive_elements()
+        snap.frame_detached_count = self.frame_detached_count
+
+        # Réseau — vision complète comme DevTools.
+        pending = self.get_pending_requests(min_age_s=1.0)
+        snap.pending_requests = [
+            {"type": p.get("resource_type", ""), "url": p["url"][-80:], "age_s": p["age_s"]}
+            for p in pending[:10]
+        ]
+        # Dernières réponses HTTP — body complet pour les requêtes importantes
+        # (charge, verify, payment-done), tronqué pour les assets statiques.
+        _ASSET_EXTS = (".js", ".css", ".png", ".svg", ".ttf", ".woff", ".ico")
+        snap.recent_responses = [
+            {
+                "method": r.method,
+                "status": r.status,
+                "url": r.url[-120:],
+                "body": "" if any(r.url.endswith(e) for e in _ASSET_EXTS)
+                        else r.response_body[:500],
+            }
+            for r in self.captured_requests[-20:]
+        ]
+        # Requêtes échouées (DNS/abort/timeout)
+        snap.failed_requests = [
+            {"method": f.get("method", ""), "url": f["url"][-100:], "error": f.get("error", "")}
+            for f in list(self.failed_requests)[-5:]
+        ]
+        signals = self.get_error_signals()
+        snap.console_errors = [
+            e.get("text", "")[:200] for e in signals.get("console_errors", [])
+        ][-5:]
 
         return snap
 

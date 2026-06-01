@@ -45,3 +45,6 @@ create index if not exists curl_templates_aggregator_idx on curl_templates (aggr
 create unique index if not exists curl_templates_active_idx
     on curl_templates (aggregator)
     where is_active;
+
+-- NOTE: schema evolutions live in schema/migrations/NNN_*.sql (one file per
+-- change). This file holds the base schema. See schema/migrations/ for the rest.

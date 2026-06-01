@@ -116,6 +116,87 @@ class Database:
         except Exception as e:  # noqa: BLE001
             log.warning("update_transaction failed: %s", e)
 
+        # Persist the per-turn AI trace into its dedicated table (browser mode).
+        await self.save_trace(tx_id, result.trace)
+
+    async def save_trace(self, tx_id: int, trace: list[dict]) -> None:
+        """Insert one transaction_traces row per AI turn, linked to tx_id."""
+        if not self.enabled or tx_id is None or not trace:
+            return
+        rows = [
+            {
+                "transaction_id": tx_id,
+                "turn": e.get("turn"),
+                "url": e.get("url"),
+                "elements": e.get("elements"),
+                "thought": e.get("thought"),
+                "actions": e.get("actions"),
+                "objective_reached": e.get("objective_reached", False),
+                "error": e.get("error"),
+            }
+            for e in trace
+        ]
+
+        def _insert():
+            self._client.table("transaction_traces").insert(rows).execute()
+
+        try:
+            await asyncio.to_thread(_insert)
+        except Exception as e:  # noqa: BLE001
+            log.warning("save_trace failed: %s", e)
+
+    async def get_traces(self, transaction_id: int) -> list[dict]:
+        """Return the per-turn trace rows for a transaction, ordered by turn."""
+        if not self.enabled:
+            return []
+
+        def _select():
+            res = (
+                self._client.table("transaction_traces")
+                .select("*")
+                .eq("transaction_id", transaction_id)
+                .order("turn")
+                .execute()
+            )
+            return res.data or []
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_traces failed: %s", e)
+            return []
+
+    async def cancel_pending(self, tx_id: int) -> dict | None:
+        """Force-settle a stuck 'pending' transaction to 'cancelled'.
+
+        Only acts on rows still 'pending' (never overwrites a settled verdict).
+        Returns the updated row, or None if not found / not pending / disabled.
+        """
+        if not self.enabled or tx_id is None:
+            return None
+
+        patch = {
+            "status": "cancelled",
+            "message": "Transaction annulée manuellement (déblocage d'un pending bloqué).",
+            "success": False,
+        }
+
+        def _update():
+            res = (
+                self._client.table("transactions")
+                .update(patch)
+                .eq("id", tx_id)
+                .eq("status", "pending")
+                .execute()
+            )
+            return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_update)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cancel_pending failed: %s", e)
+            return None
+
     async def list_transactions(self, aggregator: str | None = None, limit: int = 50) -> list[dict]:
         if not self.enabled:
             return []

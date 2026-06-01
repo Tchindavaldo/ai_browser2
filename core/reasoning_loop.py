@@ -77,6 +77,9 @@ class LoopResult:
     turns: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    # Per-turn trace of what the AI saw/thought/did — for live console logs and
+    # the persisted, queryable trace (GET /transactions/{ref}/trace).
+    trace: list[dict] = field(default_factory=list)
 
 
 class ReasoningLoop:
@@ -87,16 +90,23 @@ class ReasoningLoop:
         browser: BrowserController,
         llm: LlmClient,
         max_turns: int = 20,
+        checkout_url_predicate: "callable | None" = None,
     ):
         self.browser = browser
         self.llm = llm
         self.max_turns = max_turns
+        # Optional guard: if the URL leaves the checkout (predicate returns False),
+        # the loop stops immediately and records the redirect as the outcome.
+        self.checkout_url_predicate = checkout_url_predicate
         self.action_history: list[str] = []
         self._running = False
 
     async def run(self, objective: str) -> LoopResult:
         """Execute the reasoning loop until objective reached or max turns."""
+        import time as _time
         self._running = True
+        self._started_at = _time.time()
+        self._url_history: list[str] = []
         result = LoopResult()
 
         for turn in range(self.max_turns):
@@ -105,21 +115,23 @@ class ReasoningLoop:
                 break
 
             result.turns = turn + 1
-            log.info("=== Turn %d/%d ===", turn + 1, self.max_turns)
+            n = turn + 1
+            log.info("┌─ 🤖 IA tour %d/%d ─────────────────────", n, self.max_turns)
 
             # 1. Snapshot
             try:
                 snap = await self.browser.snapshot()
-                log.info(
-                    "Snapshot: url=%s html=%d screenshot=%d elements=%d",
-                    snap.url,
-                    len(snap.outer_html),
-                    len(snap.screenshot_b64),
-                    len(snap.interactive_elements),
-                )
+                # Inject loop-level context the browser doesn't know about
+                snap.elapsed_s = round(_time.time() - self._started_at, 1)
+                if not self._url_history or self._url_history[-1] != snap.url:
+                    self._url_history.append(snap.url)
+                snap.url_history = list(self._url_history)
+                log.info("│ 👁  vu: %d éléments interactifs | url=%s",
+                         len(snap.interactive_elements), snap.url)
             except Exception as e:
-                log.error("Snapshot failed: %s", e)
+                log.error("│ ❌ snapshot échoué: %s", e)
                 result.error = f"snapshot failed: {e}"
+                result.trace.append({"turn": n, "error": f"snapshot failed: {e}"})
                 break
 
             # 2. Build prompt and send to LLM
@@ -130,42 +142,61 @@ class ReasoningLoop:
             result.total_output_tokens += llm_resp.output_tokens
 
             if not llm_resp.success:
-                log.error("LLM error: %s", llm_resp.error)
+                log.error("│ ❌ LLM erreur: %s", llm_resp.error)
                 result.error = f"LLM error: {llm_resp.error}"
+                result.trace.append({"turn": n, "error": f"LLM error: {llm_resp.error}"})
                 break
-
-            log.info("LLM response (%d chars): %s", len(llm_resp.text), llm_resp.text[:300])
 
             # 3. Parse decision
             decision = AgentDecision.parse(llm_resp.text)
-            log.info("Thought: %s", decision.thought[:200])
+            log.info("│ 🧠 pensée: %s", decision.thought[:300])
+
+            # Record this turn's trace entry.
+            entry = {
+                "turn": n,
+                "url": snap.url,
+                "elements": len(snap.interactive_elements),
+                "thought": decision.thought,
+                "actions": [self._action_label(a) for a in decision.actions],
+                "objective_reached": decision.objective_reached,
+            }
+            result.trace.append(entry)
 
             if decision.objective_reached:
-                log.info("Objective reached: %s", decision.objective_result)
+                log.info("│ 🏁 objectif atteint: %s", str(decision.objective_result or "")[:200])
+                log.info("└────────────────────────────────────────")
                 result.success = True
                 result.result = decision.objective_result
                 break
 
             if not decision.actions:
-                log.warning("No actions in decision, skipping turn")
+                log.warning("│ ⚠️  aucune action proposée, tour ignoré")
+                log.info("└────────────────────────────────────────")
                 continue
 
             # 4. Execute actions
             for action in decision.actions:
                 await self._execute_action(action)
+            log.info("└────────────────────────────────────────")
 
         else:
             result.error = "max turns reached"
 
         self._running = False
-        log.info(
-            "Loop done: success=%s turns=%d tokens=%d/%d",
-            result.success,
-            result.turns,
-            result.total_input_tokens,
-            result.total_output_tokens,
-        )
+        log.info("✅ IA terminée: succès=%s tours=%d tokens=%d/%d",
+                 result.success, result.turns,
+                 result.total_input_tokens, result.total_output_tokens)
         return result
+
+    @staticmethod
+    def _action_label(action: dict) -> str:
+        t = action.get("type", "")
+        sel = action.get("selector", "")
+        val = action.get("value", "")
+        label = f"{t} {sel}".strip()
+        if val:
+            label += f" = {val}"
+        return label
 
     def stop(self):
         self._running = False
@@ -193,13 +224,46 @@ class ReasoningLoop:
         elements_json = json.dumps(snap.interactive_elements, ensure_ascii=False)
         history_str = "\n".join(f"- {a}" for a in self.action_history) or "(aucune)"
 
+        # Réseau — vision complète DevTools (uniquement si non vide)
+        network_lines = []
+        if snap.pending_requests:
+            network_lines.append("REQUETES EN COURS (pas encore terminees):")
+            for r in snap.pending_requests:
+                network_lines.append(f"  [{r['age_s']}s] {r['type']} ...{r['url']}")
+        if snap.recent_responses:
+            network_lines.append("DERNIERES REPONSES HTTP:")
+            for r in snap.recent_responses:
+                line = f"  {r['method']} {r['status']} ...{r['url']}"
+                if r.get("body"):
+                    line += f"\n    body: {r['body']}"
+                network_lines.append(line)
+        if snap.failed_requests:
+            network_lines.append("REQUETES ECHOUEES:")
+            for r in snap.failed_requests:
+                network_lines.append(f"  {r['method']} {r['error']} ...{r['url']}")
+        if snap.console_errors:
+            network_lines.append("ERREURS CONSOLE:")
+            for e in snap.console_errors:
+                network_lines.append(f"  {e}")
+        network_section = ("\n" + "\n".join(network_lines) + "\n") if network_lines else ""
+
+        # Historique d'URLs (uniquement si navigation multiple)
+        url_history_str = ""
+        if len(snap.url_history) > 1:
+            url_history_str = "\nHISTORIQUE URLS: " + " → ".join(snap.url_history) + "\n"
+
+        frame_info = (f" | iframe s'est détachée {snap.frame_detached_count}x"
+                      if snap.frame_detached_count > 0 else "")
         text = (
-            f"TOUR #{turn}\n\n"
+            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}\n\n"
             f"OBJECTIF: {objective}\n\n"
-            f"URL ACTUELLE: {snap.url}\n\n"
+            f"URL ACTUELLE: {snap.url}"
+            f"{url_history_str}"
+            f"{network_section}\n"
             f"ELEMENTS INTERACTIFS (JSON):\n{elements_json}\n\n"
             f"HISTORIQUE D'ACTIONS:\n{history_str}\n\n"
-            f"DOM (outerHTML, peut etre tronque):\n{snap.outer_html}\n\n"
+            f"DOM PAGE PRINCIPALE:\n{snap.page_outer_html}\n\n"
+            f"DOM FRAME ACTIF (iframe si dedans):\n{snap.outer_html}\n\n"
             f"Reponds maintenant en JSON pur selon le schema."
         )
         content.append({"type": "text", "text": text})
@@ -237,7 +301,7 @@ class ReasoningLoop:
                 label = f"UNKNOWN:{action_type}"
 
             self.action_history.append(f"{label} [OK]")
-            log.info("Action OK: %s", label)
+            log.info("│ 👉 action: %s ✓", label)
         except Exception as e:
             self.action_history.append(f"{label} [FAIL: {e}]")
-            log.warning("Action FAIL: %s -> %s", label, e)
+            log.warning("│ 👉 action: %s ✗ (%s)", label, e)

@@ -54,12 +54,19 @@ class PaymentResult:
     error_signals: dict = None
     # All captured network requests summary
     captured_requests: list[dict] = None
+    # Per-turn AI reasoning trace (browser mode) — what the agent saw/thought/did.
+    trace: list[dict] = None
+    # DEBUG (form-load): diagnostic captured when the checkout form isn't ready
+    # on first paint (stalled assets / console / HTTP errors). None if form OK.
+    form_load_diagnostic: dict = None
 
     def __post_init__(self):
         if self.captured_requests is None:
             self.captured_requests = []
         if self.error_signals is None:
             self.error_signals = {}
+        if self.trace is None:
+            self.trace = []
 
 
 @dataclass
