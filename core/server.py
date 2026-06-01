@@ -321,7 +321,12 @@ async def pay(req: PayRequest):
                     "transaction_id": last.get("id"),
                 },
             )
-        if status not in ("successful", "completed", "success"):
+        # Statuts "non-tentés" : la transaction n'a jamais atteint l'opérateur
+        # (panne API amont, erreur serveur avant déclenchement). Ils ne bloquent
+        # PAS le numéro — sinon une panne réseau gèlerait le client 17 min pour
+        # rien. Seul un échec RÉEL (failed/cancelled) déclenche la fenêtre retry.
+        _NON_ATTEMPTED = (NETWORK_UNAVAILABLE, "unknown", "error", "")
+        if status not in ("successful", "completed", "success") and status not in _NON_ATTEMPTED:
             elapsed = _seconds_since(last.get("created_at"))
             if elapsed is not None and elapsed < settings.retry_window_s:
                 remaining = int(settings.retry_window_s - elapsed)
@@ -404,6 +409,12 @@ async def pay(req: PayRequest):
             result = PaymentResult()
             result.final_status = "error"
             result.final_message = "Paiement interrompu (erreur serveur)."
+        # Panne amont (API agrégateur down) : la transaction n'a JAMAIS atteint
+        # l'opérateur — on la marque 'network_unavailable' pour que la garde
+        # anti-doublon ne bloque PAS le numéro (rien n'a été déclenché).
+        if result.error_code == NETWORK_UNAVAILABLE:
+            result.final_status = NETWORK_UNAVAILABLE
+            result.final_message = NETWORK_UNAVAILABLE_MESSAGE
         # Dérive les erreurs détaillées (table transaction_errors) depuis le
         # verdict, en distinguant le moteur et la source (ai/browser/transaction).
         result.errors = build_errors(result, engine_used)
