@@ -52,6 +52,12 @@ class Settings:
     headless: bool = field(default_factory=lambda: _env("HEADLESS", "0") == "1")
     port: int = field(default_factory=lambda: int(_env("PORT", "7332")))
 
+    # Fenêtre de retry / délai opérateur (secondes). 1020s = 17 min : le délai
+    # observé avant qu'un opérateur Mobile Money auto-annule une transaction non
+    # validée (+1 min de marge). Sert (a) au plafond de sécurité de la boucle
+    # navigateur, (b) à la garde anti-doublon par numéro côté /pay.
+    retry_window_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_S", "1020")))
+
     # Per-aggregator config
     digikuntz: DigikuntzConfig = field(default_factory=DigikuntzConfig)
 

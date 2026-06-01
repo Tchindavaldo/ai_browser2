@@ -17,6 +17,7 @@ import json
 import logging
 
 from core.base import Aggregator, PaymentRequest, PaymentResult
+from core.config import settings
 from core.reasoning_loop import ReasoningLoop
 
 log = logging.getLogger("ai_browser2")
@@ -105,6 +106,7 @@ async def run_browser_flow(
     loop = ReasoningLoop(
         browser, llm, max_turns=max_turns,
         checkout_url_predicate=aggregator.checkout_url_predicate,
+        max_elapsed_s=settings.retry_window_s,
     )
     loop_result = await loop.run(aggregator.browser_objective(req))
     result.turns = loop_result.turns

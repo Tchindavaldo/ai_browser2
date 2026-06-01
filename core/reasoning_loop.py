@@ -91,6 +91,7 @@ class ReasoningLoop:
         llm: LlmClient,
         max_turns: int = 20,
         checkout_url_predicate: "callable | None" = None,
+        max_elapsed_s: float | None = None,
     ):
         self.browser = browser
         self.llm = llm
@@ -98,6 +99,10 @@ class ReasoningLoop:
         # Optional guard: if the URL leaves the checkout (predicate returns False),
         # the loop stops immediately and records the redirect as the outcome.
         self.checkout_url_predicate = checkout_url_predicate
+        # Plafond de sécurité (secondes). Au-delà, le header du tour signale
+        # "délai dépassé" pour que l'IA conclue elle-même ; si elle ne conclut
+        # toujours pas, la boucle s'arrête pour ne pas laisser /pay pendre.
+        self.max_elapsed_s = max_elapsed_s
         self.action_history: list[str] = []
         self._running = False
 
@@ -123,11 +128,14 @@ class ReasoningLoop:
                 snap = await self.browser.snapshot()
                 # Inject loop-level context the browser doesn't know about
                 snap.elapsed_s = round(_time.time() - self._started_at, 1)
+                if self.max_elapsed_s is not None and snap.elapsed_s > self.max_elapsed_s:
+                    snap.deadline_exceeded = True
                 if not self._url_history or self._url_history[-1] != snap.url:
                     self._url_history.append(snap.url)
                 snap.url_history = list(self._url_history)
-                log.info("│ 👁  vu: %d éléments interactifs | url=%s",
-                         len(snap.interactive_elements), snap.url)
+                log.info("│ 👁  vu: %d éléments interactifs | url=%s%s",
+                         len(snap.interactive_elements), snap.url,
+                         " | ⏱ DÉLAI DÉPASSÉ" if snap.deadline_exceeded else "")
             except Exception as e:
                 log.error("│ ❌ snapshot échoué: %s", e)
                 result.error = f"snapshot failed: {e}"
@@ -178,6 +186,16 @@ class ReasoningLoop:
             for action in decision.actions:
                 await self._execute_action(action)
             log.info("└────────────────────────────────────────")
+
+            # Filet de sécurité 17 min : l'IA a vu "DÉLAI DÉPASSÉ" dans le header
+            # de ce tour et a quand même choisi d'agir plutôt que de conclure. On
+            # ne décide PAS du verdict ici — on arrête juste la boucle pour ne pas
+            # laisser /pay pendre. L'outcome (decide_browser_outcome) tranchera.
+            if snap.deadline_exceeded:
+                log.warning("│ ⏱ délai (%ss) dépassé sans conclusion de l'IA — arrêt boucle",
+                            self.max_elapsed_s)
+                result.error = "deadline exceeded"
+                break
 
         else:
             result.error = "max turns reached"
@@ -254,8 +272,19 @@ class ReasoningLoop:
 
         frame_info = (f" | iframe s'est détachée {snap.frame_detached_count}x"
                       if snap.frame_detached_count > 0 else "")
+        deadline_info = ""
+        if snap.deadline_exceeded:
+            mins = int(snap.elapsed_s // 60)
+            deadline_info = (
+                f"\n\n⏱ DÉLAI DÉPASSÉ: {mins} min écoulées sans verdict final. "
+                f"Le délai opérateur Mobile Money est dépassé — la transaction ne "
+                f"sera plus validée. Si tu as déjà cliqué Payer et qu'aucun résultat "
+                f"de succès n'est apparu, CONCLUS MAINTENANT: objective_reached=true "
+                f"avec objective_result {{\"status\":\"failed\",\"message\":\"Délai de "
+                f"validation dépassé ({mins} min) — transaction non confirmée à temps\"}}."
+            )
         text = (
-            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}\n\n"
+            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}{deadline_info}\n\n"
             f"OBJECTIF: {objective}\n\n"
             f"URL ACTUELLE: {snap.url}"
             f"{url_history_str}"
