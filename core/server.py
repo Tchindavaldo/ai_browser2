@@ -345,12 +345,13 @@ async def pay(
                     "transaction_id": last.get("id"),
                 },
             )
-        # Statuts "non-tentés" : la transaction n'a jamais atteint l'opérateur
-        # (panne API amont, erreur serveur avant déclenchement). Ils ne bloquent
-        # PAS le numéro — sinon une panne réseau gèlerait le client 17 min pour
-        # rien. Seul un échec RÉEL (failed/cancelled) déclenche la fenêtre retry.
-        _NON_ATTEMPTED = (NETWORK_UNAVAILABLE, OPERATOR_UNAVAILABLE, "unknown", "error", "")
-        if status not in ("successful", "completed", "success") and status not in _NON_ATTEMPTED:
+        # Fenêtre anti-doublon 17 min : on ne bloque QUE 'cancelled' — c'est le
+        # seul cas où un USSD a réellement été envoyé puis non validé dans le
+        # délai opérateur (la transaction peut encore se régler côté opérateur,
+        # donc on évite un doublon). Tout le reste est rechargeable tout de suite:
+        #   - solde insuffisant / refus / échec → l'utilisateur réessaie direct,
+        #   - panne API / opérateur down → rien n'a été tenté.
+        if status == "cancelled":
             elapsed = _seconds_since(last.get("created_at"))
             if elapsed is not None and elapsed < settings.retry_window_s:
                 remaining = int(settings.retry_window_s - elapsed)
@@ -359,8 +360,8 @@ async def pay(
                     {
                         "error": "retry_too_soon",
                         "message": (
-                            f"Une transaction récente ({status}) existe sur le numéro "
-                            f"{req.phone}. Réessayez dans {_fmt_duration(remaining)}."
+                            f"Une transaction récente est en cours de validation sur le "
+                            f"numéro {req.phone}. Réessayez dans {_fmt_duration(remaining)}."
                         ),
                         "aggregator": req.aggregator,
                         "phone": req.phone,
