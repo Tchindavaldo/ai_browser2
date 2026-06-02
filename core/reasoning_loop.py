@@ -12,7 +12,8 @@ log = logging.getLogger("ai_browser2")
 SYSTEM_PROMPT = """Tu es un agent browser IA. A chaque tour tu recois:
 - Un screenshot PNG de la page
 - Le DOM HTML (peut etre tronque)
-- La liste JSON des elements interactifs (input, button, select, lien)
+- La liste JSON des elements interactifs (input, button, select, lien) ; un
+  <select> porte un champ "options" listant chaque choix {value, label, selected}
 - L'historique des actions que tu as deja effectuees
 - L'objectif de l'utilisateur
 
@@ -24,7 +25,9 @@ Schema exact:
     {
       "type": "click"|"fill"|"select"|"scroll"|"navigate"|"wait"|"reload",
       "selector": string (CSS, requis pour click/fill/select),
-      "value": string (texte pour fill, option pour select, URL pour navigate),
+      "value": string (texte pour fill, URL pour navigate ; pour select: la
+               valeur EXACTE d'une option, prise dans le champ "options" de
+               l'element — utilise options[].value, jamais le libelle affiche),
       "scroll_pixels": int (scroll uniquement)
     }, ...
   ],
