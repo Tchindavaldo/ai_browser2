@@ -123,14 +123,26 @@ class ReasoningLoop:
         self._url_history: list[str] = []
         result = LoopResult()
 
-        for turn in range(self.max_turns):
+        # `turn` = compteur de tours d'ACTION (borné par max_turns). Les tours
+        # d'ATTENTE passive (await_change, ex. validation USSD) ne le consomment
+        # PAS : ils sont bornés par le temps (max_elapsed_s = 17min), pas par un
+        # nombre de tours — sinon l'attente épuiserait max_turns avant que
+        # l'utilisateur valide. `n` = numéro de tour affiché (monotone).
+        turn = 0
+        n = 0
+        hit_max_turns = False
+        while True:
             if not self._running:
                 result.error = "stopped"
                 break
+            if turn >= self.max_turns:
+                hit_max_turns = True
+                break
 
-            result.turns = turn + 1
-            n = turn + 1
-            log.info("┌─ 🤖 IA tour %d/%d ─────────────────────", n, self.max_turns)
+            n += 1
+            result.turns = n
+            log.info("┌─ 🤖 IA tour %d (action %d/%d) ─────────────────────",
+                     n, turn + 1, self.max_turns)
 
             # 1. Snapshot
             try:
@@ -152,7 +164,7 @@ class ReasoningLoop:
                 break
 
             # 2. Build prompt and send to LLM
-            user_content = self._build_user_content(snap, objective, turn)
+            user_content = self._build_user_content(snap, objective, n)
             llm_resp = await self.llm.send(SYSTEM_PROMPT, user_content)
 
             result.total_input_tokens += llm_resp.input_tokens
@@ -186,15 +198,46 @@ class ReasoningLoop:
                 result.result = decision.objective_result
                 break
 
-            if not decision.actions and not decision.await_change:
-                log.warning("│ ⚠️  aucune action proposée, tour ignoré")
+            # ATTENTE PASSIVE (await_change) : l'IA a fini d'agir et attend qu'un
+            # évènement extérieur change la page (ex. validation USSD). Le code
+            # OBSERVE jusqu'au prochain changement (fait mécanique, sans juger),
+            # puis redonne la main à l'IA SANS consommer de tour d'action — la
+            # phase d'attente est bornée par le temps (max_elapsed_s), pas par
+            # max_turns. On exécute d'abord les éventuelles actions du tour.
+            if decision.await_change:
+                for action in decision.actions:
+                    await self._execute_action(action)
                 log.info("└────────────────────────────────────────")
+                if snap.deadline_exceeded:
+                    log.warning("│ ⏱ délai (%ss) dépassé — arrêt boucle", self.max_elapsed_s)
+                    result.error = "deadline exceeded"
+                    break
+                remaining = None
+                if self.max_elapsed_s is not None:
+                    remaining = self.max_elapsed_s - (_time.time() - self._started_at)
+                    if remaining <= 0:
+                        result.error = "deadline exceeded"
+                        break
+                budget = min(remaining, 1020) if remaining is not None else 1020
+                baseline = (snap.outer_html or "")[:500]
+                log.info("│ ⏳ attente passive d'un changement de page (max %ds)…", int(budget))
+                changed = await self.browser.wait_for_page_change(budget, baseline=baseline)
+                if changed is None:
+                    log.info("│ ⏳ aucun changement dans le budget — l'IA réévaluera")
+                # NE PAS incrémenter `turn` : c'était une attente, pas une action.
                 continue
 
-            # 4. Execute actions
+            if not decision.actions:
+                log.warning("│ ⚠️  aucune action proposée, tour ignoré")
+                log.info("└────────────────────────────────────────")
+                turn += 1
+                continue
+
+            # 4. Execute actions (tour d'action — consomme un tour).
             for action in decision.actions:
                 await self._execute_action(action)
             log.info("└────────────────────────────────────────")
+            turn += 1
 
             # Filet de sécurité 17 min : l'IA a vu "DÉLAI DÉPASSÉ" dans le header
             # de ce tour et a quand même choisi d'agir plutôt que de conclure. On
@@ -206,27 +249,7 @@ class ReasoningLoop:
                 result.error = "deadline exceeded"
                 break
 
-            # ATTENTE PASSIVE entre deux regards de l'IA : si l'IA a demandé
-            # await_change (ex. USSD envoyé, elle attend la validation), le code
-            # OBSERVE jusqu'au prochain changement de page (fait mécanique, sans
-            # juger) au lieu de la rappeler en boucle. Elle reprend la main et
-            # décide au tour suivant. Économise les tokens; l'IA reste seule juge.
-            if decision.await_change:
-                remaining = None
-                if self.max_elapsed_s is not None:
-                    remaining = self.max_elapsed_s - (_time.time() - self._started_at)
-                    if remaining <= 0:
-                        # Délai global dépassé: l'IA le verra (deadline_exceeded)
-                        # au prochain tour et conclura. On reboucle sans attendre.
-                        continue
-                budget = min(remaining, 1020) if remaining is not None else 1020
-                baseline = (snap.outer_html or "")[:500]
-                log.info("│ ⏳ attente passive d'un changement de page (max %ds)…", int(budget))
-                changed = await self.browser.wait_for_page_change(budget, baseline=baseline)
-                if changed is None:
-                    log.info("│ ⏳ aucun changement dans le budget — l'IA réévaluera")
-
-        else:
+        if hit_max_turns:
             result.error = "max turns reached"
 
         self._running = False
