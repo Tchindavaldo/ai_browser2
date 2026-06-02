@@ -40,9 +40,25 @@ async def run_browser_flow(
     """
     browser = await aggregator.browser.acquire_session()
     try:
-        return await _run_browser_flow_in_session(aggregator, req, browser, max_turns, tx_id)
+        result = await _run_browser_flow_in_session(
+            aggregator, req, browser, max_turns, tx_id)
     finally:
+        # La tab est fermée ICI, dès que la phase navigateur est finie (USSD
+        # envoyé ou verdict avant-USSD). Le polling éventuel se fait APRÈS, sans
+        # navigateur.
         await aggregator.browser.release_session(browser)
+
+    # Phase post-navigateur (tab déjà fermée) : si l'USSD a été demandé,
+    # decide_browser_outcome a posé result.poll_after_close ; on poll/webhook en
+    # HTTP pur jusqu'au verdict opérateur. Aucune session n'est tenue pendant ce
+    # temps (potentiellement plusieurs minutes) — le pool reste libre.
+    if result.poll_after_close:
+        await aggregator.finalize_after_close(req, result)
+
+    # success final dérivé du verdict réel (ussd_sent n'est plus terminal ici).
+    if not result.success:
+        result.success = result.final_status in ("successful", "completed")
+    return result
 
 
 async def _run_browser_flow_in_session(
@@ -204,8 +220,11 @@ async def _run_browser_flow_in_session(
         {"method": r.method, "url": r.url[:200], "status": r.status} for r in captured
     ]
 
-    if not result.success:
-        result.success = result.final_status in ("successful", "completed", "ussd_sent")
+    # NB: si l'USSD a été demandé (result.poll_after_close posé), le verdict réel
+    # n'est pas encore connu — `success` est calculé par run_browser_flow APRÈS
+    # finalize_after_close. On ne marque success qu'en cas de verdict déjà terminal.
+    if not result.success and not result.poll_after_close:
+        result.success = result.final_status in ("successful", "completed")
     if loop_result.error and not result.error:
         result.error = loop_result.error
     return result

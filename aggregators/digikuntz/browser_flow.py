@@ -189,21 +189,28 @@ class DigikuntzAgent:
             or "USSD" in agent_message.upper()
             or "*126" in agent_message
         )
-        # Cas 2 — USSD demandé : le navigateur a fini. On POLL verify/mpesa
-        # Flutterwave (MÊME mécanisme fiable et immédiat que le replay) en
-        # réutilisant modalauditid/flw_ref capturés. Le statut DigiKUNTZ (payin_*)
-        # traîne (reste pending même après échec), donc on ne s'y fie pas.
+        # Cas 2 — USSD demandé : le navigateur a FINI son travail. On ne poll PAS
+        # ici (la tab est encore ouverte) : on EXTRAIT les params verify/mpesa
+        # capturés et on les pose sur result.poll_after_close. Le runner ferme la
+        # session (tab) PUIS appelle finalize_after_close() qui poll en HTTP pur,
+        # sans navigateur. Le statut DigiKUNTZ (payin_*) traîne (reste pending même
+        # après échec), donc on s'appuie sur le verify Flutterwave (fiable).
         if ussd_detected:
             vp = status_poll.extract_verify_params(sb.captured_requests)
             if vp:
-                log.info("USSD demandé — polling verify Flutterwave (flw_ref=%s)",
-                         vp["flw_ref"])
-                poll = await status_poll.poll_verify_flutterwave(
-                    vp, req.network, provider_id=result.provider_transaction_id or None)
-                result.final_status = poll["status"]
-                result.final_message = poll["message"]
+                log.info("USSD demandé — navigateur fermé, polling verify différé "
+                         "(flw_ref=%s)", vp["flw_ref"])
+                result.poll_after_close = {
+                    "verify_params": vp,
+                    "provider_id": result.provider_transaction_id or None,
+                }
+                # Statut provisoire : le navigateur a bien envoyé l'USSD. Le
+                # verdict définitif viendra de finalize_after_close (après close).
+                result.final_status = "ussd_sent"
+                result.final_message = (
+                    "USSD envoyé au client. Validation en attente sur le téléphone."
+                )
                 result.payment_status = result.final_status
-                log.info("Verdict polling verify: %s", result.final_status)
                 return
             log.warning("USSD détecté mais flw_ref introuvable — fallback conclusion IA")
 
@@ -229,6 +236,27 @@ class DigikuntzAgent:
         result.final_status = status or "unknown"
         result.final_message = msg
         result.payment_status = result.final_status
+
+    async def finalize_after_close(self, req, result) -> None:
+        """Verdict final après fermeture du navigateur (tab déjà fermée).
+
+        Appelé par le runner quand decide_browser_outcome a posé
+        result.poll_after_close (USSD demandé). Poll verify/mpesa Flutterwave en
+        HTTP pur — aucun navigateur — jusqu'à terminal ou délai opérateur ; écoute
+        aussi le webhook DigiKUNTZ via le registre (le premier des deux gagne).
+        """
+        spec = result.poll_after_close
+        if not spec:
+            return
+        vp = spec["verify_params"]
+        log.info("finalize_after_close — polling verify Flutterwave (flw_ref=%s, "
+                 "navigateur déjà fermé)", vp["flw_ref"])
+        poll = await status_poll.poll_verify_flutterwave(
+            vp, req.network, provider_id=spec.get("provider_id"))
+        result.final_status = poll["status"]
+        result.final_message = poll["message"]
+        result.payment_status = result.final_status
+        log.info("Verdict polling verify (post-close): %s", result.final_status)
 
     def _friendly(self, status: str, network: str, raw: str,
                   ussd_sent: bool = False) -> str:

@@ -55,6 +55,11 @@ class PaymentResult:
     # USSD validation result after waiting
     final_status: str = ""
     final_message: str = ""
+    # Polling à exécuter APRÈS la fermeture du navigateur (sans tab). Posé par
+    # decide_browser_outcome quand l'USSD est demandé : le navigateur a fini, on
+    # ferme sa tab, puis le runner appelle finalize_after_close() qui poll/webhook
+    # en HTTP pur. None = rien à poller (verdict déjà connu avant l'USSD).
+    poll_after_close: dict = None
     # Console + network error signals captured around the Pay click
     error_signals: dict = None
     # All captured network requests summary
@@ -155,7 +160,23 @@ class Aggregator(ABC):
         Provider-specific (e.g. DigiKUNTZ's USSD watch loop + classifier/LLM
         verdict); the generic runner delegates the verdict here. `session` is the
         isolated BrowserSession used for this transaction (its own tab/capture).
+
+        Quand l'USSD a été demandé, NE poll PAS ici (la tab est encore ouverte) :
+        pose plutôt result.poll_after_close = {...}. Le runner ferme la session
+        puis appelle finalize_after_close() qui poll/webhook SANS navigateur.
         """
+
+    async def finalize_after_close(
+        self, req: PaymentRequest, result: PaymentResult
+    ) -> None:
+        """Verdict final APRÈS fermeture du navigateur (tab déjà fermée).
+
+        Appelé par le runner une fois la session relâchée, uniquement si
+        decide_browser_outcome a posé result.poll_after_close. Exécute le polling
+        (et la coordination webhook) en HTTP pur — aucun navigateur. Par défaut
+        no-op : un agrégateur qui ne diffère pas son verdict n'a rien à faire ici.
+        """
+        return None
 
     @abstractmethod
     def network_label(self, network: str) -> str:

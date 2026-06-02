@@ -60,8 +60,9 @@ ai_browser2/
 │       ├── aggregator.py         DigikuntzAggregator : implémente l'ABC, s'enregistre, replay (steps
 │       │                         + ReplayConfig par appel), extract_curl_template, matchers.
 │       ├── browser_flow.py       Mode navigateur : browser_objective (prompt FR — le navigateur
-│       │                         S'ARRÊTE dès l'USSD demandé), decide_browser_outcome (délègue au
-│       │                         polling statut une fois l'USSD envoyé), _interpret/_friendly.
+│       │                         S'ARRÊTE dès l'USSD demandé), decide_browser_outcome (pose
+│       │                         poll_after_close, tab fermée), finalize_after_close (polling
+│       │                         verify HORS navigateur), _interpret/_friendly.
 │       ├── status_poll.py        Polling statut DigiKUNTZ (GET {base}/transaction?transactionId=) :
 │       │                         source de vérité du verdict après USSD. payin_* -> interne, poll
 │       │                         jusqu'à terminal ou 17min (pending 17min -> expired). 0 token.
@@ -96,9 +97,13 @@ ai_browser2/
 3. **browser** : `run_browser_flow` acquiert une **session isolée**, crée la transaction
    DigiKUNTZ, ouvre le checkout Flutterwave, lance la **boucle IA** (remplir + Payer). Dès
    que l'USSD est demandé au client, **le navigateur S'ARRÊTE** (conclut `ussd_sent`, ~6
-   tours — pas de surveillance coûteuse de l'écran). `decide_browser_outcome` **délègue au
-   polling statut DigiKUNTZ** (`status_poll.py`) qui suit la transaction jusqu'au verdict
-   terminal ou 17min (pending 17min -> `expired`). Le polling ne coûte aucun token.
+   tours — pas de surveillance coûteuse de l'écran). `decide_browser_outcome` extrait alors
+   les params verify (flw_ref/modalauditid) et les pose sur `result.poll_after_close` SANS
+   poller : **la tab est fermée immédiatement** (`release_session`). Ce n'est qu'APRÈS, hors
+   session, que `run_browser_flow` appelle `finalize_after_close` -> **polling verify
+   Flutterwave** (`status_poll.py`) en HTTP pur, jusqu'au verdict terminal ou délai opérateur
+   (pending -> `expired`). Aucun navigateur n'est tenu pendant l'attente ; le polling ne
+   coûte aucun token.
    *(Webhook serveur possible quand le backend a une URL publique — cf.
    `todo/webhook-digikuntz.md`.)*
 4. **replay** : `step1..step4` rejouent charge + poll verify (17min), `ReplayConfig` par appel.

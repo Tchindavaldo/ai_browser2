@@ -48,6 +48,9 @@ class DigikuntzAggregator(Aggregator):
     async def decide_browser_outcome(self, req, loop_result, result, session=None) -> None:
         await self._agent.decide_browser_outcome(req, loop_result, result, session=session)
 
+    async def finalize_after_close(self, req, result) -> None:
+        await self._agent.finalize_after_close(req, result)
+
     def network_label(self, network: str) -> str:
         return replay_flow.network_label(network)
 
