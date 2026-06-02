@@ -383,8 +383,11 @@ async def pay(
         #   - panne API / opérateur down → rien n'a été tenté.
         if status == "cancelled":
             elapsed = _seconds_since(last.get("created_at"))
-            if elapsed is not None and elapsed < settings.retry_window_s:
-                remaining = int(settings.retry_window_s - elapsed)
+            # Fenêtre selon l'opérateur de la transaction stockée (Orange 17min /
+            # MTN 10min), pas un délai unique.
+            window = settings.retry_window_for(last.get("network", ""))
+            if elapsed is not None and elapsed < window:
+                remaining = int(window - elapsed)
                 raise HTTPException(
                     409,
                     {

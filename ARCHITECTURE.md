@@ -109,9 +109,19 @@ ai_browser2/
 
 ## Statuts finaux possibles
 
-`successful` · `failed` (refus/solde insuffisant) · `cancelled` (USSD refusé) ·
-`expired` (17min écoulées, relançable) · `pending` (en cours) ·
-`network_unavailable` / `operator_unavailable` (pannes amont → 503).
+- `successful` — payé.
+- `failed` — échec AVANT l'USSD (solde insuffisant au /charge, etc.). Relançable.
+- `cancelled` — échec APRÈS l'USSD = refus/non-validation par l'utilisateur (un
+  solde insuffisant ne déclenche jamais d'USSD). **Bloque** le numéro pendant la
+  fenêtre opérateur.
+- `expired` — fenêtre opérateur écoulée sans verdict. Relançable tout de suite.
+- `pending` — en cours.
+- `network_unavailable` / `operator_unavailable` — pannes amont → **503**.
+
+**Délai opérateur (fenêtre) DÉPEND du réseau** : Orange ~17min, MTN ~10min
+(`settings.retry_window_for(network)`, env `RETRY_WINDOW_ORANGE_S`/`_MTN_S`).
+Sert au polling verify, au plafond de la boucle navigateur, et à la garde
+anti-doublon. Seuls `pending` et `cancelled` bloquent un nouveau paiement.
 
 ## Concurrence
 

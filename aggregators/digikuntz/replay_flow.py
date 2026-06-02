@@ -100,7 +100,11 @@ def interpret_charge(resp: dict, network: str) -> tuple[str, str] | None:
 def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
     """Interpret a /verify/mpesa response.
 
-    At verify stage, USSD WAS sent, so a failure = user refused / insufficient funds.
+    L'USSD A ÉTÉ ENVOYÉ à ce stade. Or un solde insuffisant NE déclenche PAS
+    d'USSD (il échoue au /charge, avant). Donc tout ÉCHEC après USSD = l'utilisateur
+    a REFUSÉ / laissé expirer sur son téléphone -> 'cancelled' (et non 'failed').
+    'cancelled' bloque le numéro pendant la fenêtre (transaction déclenchée côté
+    opérateur). Vaut pour les DEUX moteurs (replay + navigateur partagent cette fn).
     """
     data = resp.get("data", {})
     if not isinstance(data, dict):
@@ -115,8 +119,8 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
         if st == "successful":
             return "successful", msg
         if st == "failed":
-            return "failed", ("Paiement échoué après le USSD "
-                              "(refus de l'utilisateur ou solde insuffisant).")
+            return "cancelled", ("Paiement refusé / non validé sur le USSD "
+                                 "par l'utilisateur.")
         # pending (code 02) → the USSD was sent. The final verdict can still
         # arrive via data.status (e.g. status=failed while code stays 02), so
         # don't stop at the code — fall through to the status check below.
@@ -127,8 +131,9 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
         if st in ("successful", "cancelled"):
             return st, msg
         if st == "failed":
-            return "failed", ("Paiement échoué après le USSD "
-                              "(refus de l'utilisateur ou solde insuffisant).")
+            # Échec APRÈS USSD = refus utilisateur -> cancelled (cf. docstring).
+            return "cancelled", ("Paiement refusé / non validé sur le USSD "
+                                 "par l'utilisateur.")
         # pending → continue
         return None
 

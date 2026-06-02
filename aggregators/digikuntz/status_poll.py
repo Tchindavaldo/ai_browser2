@@ -154,7 +154,7 @@ async def poll_verify_flutterwave(
     """
     from . import replay_flow  # pour interpret_verify + ReplayConfig (lecture seule)
     if timeout_s is None:
-        timeout_s = settings.retry_window_s
+        timeout_s = settings.retry_window_for(network)  # Orange 17min / MTN 10min
     cfg = replay_flow.ReplayConfig.defaults()
     if verify_params.get("pub_key"):
         cfg.pub_key = verify_params["pub_key"]
