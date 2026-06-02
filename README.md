@@ -212,9 +212,11 @@ téléphone). Utiliser un petit montant et un numéro contrôlé.
 > validation USSD jusqu'à 17 min) — Postman resterait en attente sans réponse.
 
 **Comportement clé des deux moteurs (aligné)** :
-- Après le clic Payer, l'**IA reste active** et attend la validation USSD jusqu'à
-  **17 min** (le délai opérateur). Elle ne conclut que sur un vrai résultat lu à
-  l'écran ; le code n'interprète pas à sa place.
+- **Navigateur** : il s'**arrête dès que l'USSD est demandé** au client (statut
+  `ussd_sent`) — il ne surveille pas la validation à l'écran (coûteux). Le statut
+  final vient du **polling statut DigiKUNTZ** (`GET {base}/transaction?transactionId=`),
+  jusqu'au verdict terminal ou **17 min** (un `pending` qui dure 17 min → `expired`).
+  *(Webhook serveur possible une fois le backend déployé — cf. `todo/webhook-digikuntz.md`.)*
 - Statuts finaux : `successful`, `failed` (refus / solde insuffisant),
   `cancelled` (refus USSD), **`expired`** (17 min écoulées → **relançable tout de
   suite**), `pending`. Pannes amont → **503** `network_unavailable` (API) ou

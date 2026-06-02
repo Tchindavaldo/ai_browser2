@@ -59,8 +59,12 @@ ai_browser2/
 │   └── digikuntz/
 │       ├── aggregator.py         DigikuntzAggregator : implémente l'ABC, s'enregistre, replay (steps
 │       │                         + ReplayConfig par appel), extract_curl_template, matchers.
-│       ├── browser_flow.py       Mode navigateur : browser_objective (prompt FR), decide_browser_outcome
-│       │                         (recueille le verdict de l'IA ; expired au timeout), _interpret/_friendly.
+│       ├── browser_flow.py       Mode navigateur : browser_objective (prompt FR — le navigateur
+│       │                         S'ARRÊTE dès l'USSD demandé), decide_browser_outcome (délègue au
+│       │                         polling statut une fois l'USSD envoyé), _interpret/_friendly.
+│       ├── status_poll.py        Polling statut DigiKUNTZ (GET {base}/transaction?transactionId=) :
+│       │                         source de vérité du verdict après USSD. payin_* -> interne, poll
+│       │                         jusqu'à terminal ou 17min (pending 17min -> expired). 0 token.
 │       └── replay_flow.py        Mode curl replay : step1..step4 (create/init/charge/poll verify),
 │                                 ReplayConfig (config par appel, pas de globals mutés), interpret_*.
 │
@@ -90,9 +94,13 @@ ai_browser2/
 2. Insère la transaction `pending`, dispatch selon `mode` (auto/browser/replay) vers
    l'agrégateur (`pay_via_browser` ou `replay`).
 3. **browser** : `run_browser_flow` acquiert une **session isolée**, crée la transaction
-   DigiKUNTZ, ouvre le checkout Flutterwave, lance la **boucle IA** (remplir + Payer), puis
-   l'IA **reste dans la boucle** pour attendre la validation USSD (`await_change`, bornée
-   par 17min) et conclut elle-même. `decide_browser_outcome` recueille ce verdict.
+   DigiKUNTZ, ouvre le checkout Flutterwave, lance la **boucle IA** (remplir + Payer). Dès
+   que l'USSD est demandé au client, **le navigateur S'ARRÊTE** (conclut `ussd_sent`, ~6
+   tours — pas de surveillance coûteuse de l'écran). `decide_browser_outcome` **délègue au
+   polling statut DigiKUNTZ** (`status_poll.py`) qui suit la transaction jusqu'au verdict
+   terminal ou 17min (pending 17min -> `expired`). Le polling ne coûte aucun token.
+   *(Webhook serveur possible quand le backend a une URL publique — cf.
+   `todo/webhook-digikuntz.md`.)*
 4. **replay** : `step1..step4` rejouent charge + poll verify (17min), `ReplayConfig` par appel.
 5. **finally** : settle la transaction en BD (+ trace + errors), construit la réponse.
    - panne amont (API/opérateur) → **503** `{code, message}` (vue uniforme client) ;
