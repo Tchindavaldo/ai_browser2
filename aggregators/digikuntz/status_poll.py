@@ -111,6 +111,63 @@ async def fetch_status(transaction_id: str) -> dict | None:
     }
 
 
+def extract_verify_params(captured) -> dict | None:
+    """Extrait modalauditid + flw_ref + PBFPubKey des requêtes verify/mpesa
+    capturées par le navigateur, pour pouvoir poller verify EN HTTP après la
+    fermeture du navigateur (comme le replay). Retourne None si introuvable.
+
+    `captured` = liste de CapturedRequest (session.captured_requests).
+    """
+    import json as _json
+    for r in reversed(captured):  # la plus récente d'abord
+        if "/verify/mpesa" in r.url and r.method == "POST" and r.request_body:
+            try:
+                body = _json.loads(r.request_body)
+            except (ValueError, TypeError):
+                continue
+            flw_ref = body.get("flw_ref")
+            modalauditid = body.get("modalauditid")
+            if flw_ref and modalauditid:
+                return {
+                    "modalauditid": modalauditid,
+                    "flw_ref": flw_ref,
+                    "pub_key": body.get("PBFPubKey", _dk.flw_pub_key),
+                }
+    return None
+
+
+async def poll_verify_flutterwave(
+    verify_params: dict, network: str, timeout_s: int | None = None
+) -> dict:
+    """Poll verify/mpesa Flutterwave (MÊME mécanisme que le replay step4) après
+    fermeture du navigateur. Source immédiate et fiable (vs statut DigiKUNTZ qui
+    traîne). Retourne {status, message}. 17min sans terminal -> expired.
+    """
+    # Réutilise la logique éprouvée du replay : step4_poll_verify + interpret_verify.
+    from . import replay_flow
+    if timeout_s is None:
+        timeout_s = settings.retry_window_s
+    cfg = replay_flow.ReplayConfig.defaults()
+    if verify_params.get("pub_key"):
+        cfg.pub_key = verify_params["pub_key"]
+    log.info("poll_verify_flutterwave: flw_ref=%s (max %ds)",
+             verify_params["flw_ref"], timeout_s)
+    verify = await replay_flow.step4_poll_verify(
+        verify_params["modalauditid"], verify_params["flw_ref"],
+        timeout_s=timeout_s, cfg=cfg,
+    )
+    verdict = replay_flow.interpret_verify(verify, network)
+    if verdict:
+        return {"status": verdict[0], "message": verdict[1]}
+    if verify.get("status") == "timeout":
+        # 17min sans verdict terminal = délai opérateur dépassé.
+        return {"status": "expired",
+                "message": ("Délai de validation dépassé (17 min). La demande a "
+                            "expiré côté opérateur. Vous pouvez relancer un paiement.")}
+    st = verify.get("data", {}).get("status", "unknown")
+    return {"status": st, "message": f"Statut: {st}"}
+
+
 async def poll_until_terminal(
     transaction_id: str, timeout_s: int | None = None, interval_s: float = 5.0
 ) -> dict:

@@ -187,20 +187,24 @@ class DigikuntzAgent:
             agent_status in ("ussd_sent", "pending")
             or "150*50" in agent_message
             or "USSD" in agent_message.upper()
+            or "*126" in agent_message
         )
-        if ussd_detected and result.provider_transaction_id:
-            log.info("USSD demandé — délégation au polling statut DigiKUNTZ (tx=%s)",
-                     result.provider_transaction_id)
-            poll = await status_poll.poll_until_terminal(result.provider_transaction_id)
-            result.final_status = poll["status"]
-            result.final_message = self._friendly(
-                poll["status"], req.network,
-                json.dumps(poll.get("data") or {}, ensure_ascii=False)[:300],
-                ussd_sent=True,
-            )
-            result.payment_status = result.final_status
-            log.info("Verdict polling statut: %s", result.final_status)
-            return
+        # Cas 2 — USSD demandé : le navigateur a fini. On POLL verify/mpesa
+        # Flutterwave (MÊME mécanisme fiable et immédiat que le replay) en
+        # réutilisant modalauditid/flw_ref capturés. Le statut DigiKUNTZ (payin_*)
+        # traîne (reste pending même après échec), donc on ne s'y fie pas.
+        if ussd_detected:
+            vp = status_poll.extract_verify_params(sb.captured_requests)
+            if vp:
+                log.info("USSD demandé — polling verify Flutterwave (flw_ref=%s)",
+                         vp["flw_ref"])
+                poll = await status_poll.poll_verify_flutterwave(vp, req.network)
+                result.final_status = poll["status"]
+                result.final_message = poll["message"]
+                result.payment_status = result.final_status
+                log.info("Verdict polling verify: %s", result.final_status)
+                return
+            log.warning("USSD détecté mais flw_ref introuvable — fallback conclusion IA")
 
         # Cas 3 — l'IA a conclu un statut métier AVANT l'USSD (échec immédiat au
         # charge, solde insuffisant lu à l'écran…). On respecte sa conclusion.
@@ -212,18 +216,7 @@ class DigikuntzAgent:
             log.info("Verdict de l'IA (avant USSD): %s", result.final_status)
             return
 
-        # Cas 4 — pas de conclusion nette. Si on a un id provider, on tente quand
-        # même le polling (la transaction existe peut-être côté DigiKUNTZ) ;
-        # sinon dernier recours LLM sur le texte/charge.
-        if result.provider_transaction_id:
-            log.info("Pas de conclusion IA — polling statut DigiKUNTZ par sécurité")
-            poll = await status_poll.poll_until_terminal(result.provider_transaction_id)
-            result.final_status = poll["status"]
-            result.final_message = self._friendly(
-                poll["status"], req.network,
-                json.dumps(poll.get("data") or {}, ensure_ascii=False)[:300], ussd_sent=True)
-            result.payment_status = result.final_status
-            return
+        # Cas 4 — pas de conclusion nette : dernier recours LLM sur le texte/charge.
         charge_req = sb.get_flutterwave_charge()
         charge_body = charge_req.response_body if charge_req else ""
         combined = "\n".join(filter(None, [
