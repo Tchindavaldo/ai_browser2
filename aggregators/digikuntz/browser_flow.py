@@ -197,9 +197,16 @@ class DigikuntzAgent:
                 log.info("USSD inferred from charge response (%r)", cb_hit[1])
 
         if ussd_detected and not agent_concluded:
-            log.info("USSD sent! Watching for page change (react on change, no fixed wait)...")
+            # Fenêtre d'attente de la validation USSD: ALIGNÉE sur le replay
+            # (step4_poll_verify) = retry_window_s (1020s = 17 min, le délai avant
+            # que l'opérateur auto-annule). À 60s on concluait 'timeout' trop tôt
+            # alors que la transaction était encore validable côté opérateur —
+            # statut/conclusion incohérents entre navigateur et replay.
+            watch_budget = settings.retry_window_s
+            log.info("USSD sent! Watching for page change (budget=%ds, react on change)...",
+                     watch_budget)
             await sb.watch_page_changes()
-            for i in range(60):  # safety cap 60s, but we break the instant anything changes
+            for i in range(watch_budget):  # plafond = délai opérateur; break dès qu'il se passe qqch
                 await asyncio.sleep(1)
 
                 # React the moment the page changes (validation or refusal).
@@ -241,9 +248,16 @@ class DigikuntzAgent:
                 except Exception as e:
                     log.warning("Poll error: %s", e)
             else:
-                result.final_status = "timeout"
-                result.final_message = "L'utilisateur n'a pas valide le USSD dans le delai imparti."
-                log.info("USSD validation timeout")
+                # Budget écoulé (17 min) sans validation : même verdict que le
+                # replay — l'opérateur a auto-annulé la transaction non validée
+                # dans le délai. 'cancelled' (et non 'timeout') pour cohérence
+                # de statut entre les deux moteurs.
+                result.final_status = "cancelled"
+                result.final_message = (
+                    "Transaction annulée par l'opérateur "
+                    "(USSD non validé dans le délai imparti)."
+                )
+                log.info("USSD validation timeout (%ds) -> cancelled", settings.retry_window_s)
         else:
             # No USSD. Classify the authoritative texts in priority order:
             #   1. the message the agent read on the page after Pay
