@@ -42,11 +42,21 @@ class DigikuntzAgent:
             f"5. Attends 5 secondes et lis le resultat\n\n"
             f"IMPORTANT:\n"
             f"- Si le bouton Pay est disabled, c'est que le reseau n'est pas selectionne. Selectionne-le d'abord.\n"
+            f"- AVANT DE RECHARGER, REGARDE TON HISTORIQUE D'ACTIONS: as-tu DEJA "
+            f"clique sur Payer/submit dans un tour precedent ? Si OUI, tu NE DOIS "
+            f"PLUS JAMAIS recharger ni re-remplir ni re-cliquer Payer — sinon tu "
+            f"envoies un 2e paiement (double debit). Apres le clic Payer, le "
+            f"formulaire disparait et un LOADER s affiche, l iframe peut se "
+            f"detacher: c est NORMAL, c est le paiement qui se traite. Dans ce cas "
+            f"tu ATTENDS (action wait) et tu LIS le resultat (USSD, succes, echec), "
+            f"tu ne recharges pas.\n"
             f"- IFRAME DETACHEE (frame_detached_count > 0 dans le header du tour): "
-            f"si tu vois 'iframe s est detachee Nx' dans le header de ton tour ET que "
-            f"0 elements interactifs ET que v3/checkout/initialize a deja reussi, "
+            f"cette regle ne vaut QUE si tu n as PAS encore clique Payer. Si tu vois "
+            f"'iframe s est detachee Nx' ET 0 elements interactifs ET que tu n as "
+            f"PAS encore clique Payer ET que v3/checkout/initialize a deja reussi, "
             f"RECHARGE IMMEDIATEMENT sans attendre — le formulaire n apparaitra jamais "
-            f"dans ce cas car Vue.js a demarré dans un état corrompu.\n"
+            f"dans ce cas car Vue.js a demarré dans un état corrompu. Mais si tu as "
+            f"deja clique Payer, NE RECHARGE PAS (voir regle ci-dessus).\n"
             f"- COMMENT SAVOIR SI LE FORMULAIRE VA APPARAITRE: si l iframe ne s est PAS "
             f"detachee, regarde les DERNIERES REPONSES HTTP. Si tu vois "
             f"'v3/checkout/initialize' [200] et scripts en cours, attends 3-5s. "
@@ -81,18 +91,27 @@ class DigikuntzAgent:
             f"d'authentification — session de paiement perdue\"}}.\n"
             f"- Ne perds jamais de vue ton objectif: payer via mobile money. Tu ne "
             f"dois JAMAIS creer de compte ni te connecter.\n\n"
-            f"L'objectif est ATTEINT dans l'un de ces cas — agis IMMEDIATEMENT:\n"
-            f"  a) Tu vois '#150*50#' ou 'USSD' ou 'dial' apres le clic Payer → ussd_sent\n"
-            f"  b) La page affiche un message de succes ou echec apres Payer → success ou error\n"
-            f"  c) L'URL de la page principale (pas l'iframe) contient 'payment-done' ou "
-            f"'payments.digikuntz.com' → c'est la page de resultat DigiKUNTZ, LIS son contenu "
-            f"(status=failed/success dans l'URL ou le texte) et conclus IMMEDIATEMENT\n"
-            f"  d) Tu es redirige vers une page inconnue apres Payer → conclus avec ce que tu vois\n"
-            f"  e) Si le header du tour affiche 'DÉLAI DÉPASSÉ' (plafond 17 min atteint) "
-            f"et que tu as deja clique Payer sans voir de succes → conclus failed "
-            f"(le delai operateur est ecoule, la transaction ne sera plus validee)\n\n"
+            f"APRES LE CLIC PAYER — TU N'AS PAS ENCORE FINI:\n"
+            f"  - Si tu vois '#150*50#' / 'USSD' / 'dial' / 'composez' / 'en cours "
+            f"de traitement' : le paiement attend la validation de l'utilisateur "
+            f"sur son telephone. Ce N'EST PAS une conclusion. NE conclus PAS "
+            f"'ussd_sent' comme objectif atteint. A la place: actions:[] vide ET "
+            f"await_change=true — tu attends que la page change (validation ou "
+            f"refus). Le systeme te redonnera la main quand la page bougera.\n"
+            f"  - Continue ainsi jusqu'a voir un VRAI resultat final.\n\n"
+            f"L'objectif est REELLEMENT ATTEINT (objective_reached=true) seulement si:\n"
+            f"  a) La page affiche un message clair de SUCCES apres validation → success\n"
+            f"  b) La page affiche un ECHEC / refus / solde insuffisant → error\n"
+            f"  c) L'URL de la page principale contient 'payment-done' ou "
+            f"'payments.digikuntz.com' → page de resultat DigiKUNTZ: LIS son contenu "
+            f"(status=failed/success) et conclus\n"
+            f"  d) Tu es redirige vers une page inconnue qui montre un resultat → conclus\n"
+            f"  e) Header 'DÉLAI DÉPASSÉ' (plafond atteint) ET pas de succes → conclus "
+            f"error (le delai operateur est ecoule).\n"
+            f"Tant qu'aucun de ces cas n'est vrai apres Payer, NE conclus PAS: "
+            f"await_change=true et attends.\n\n"
             f"Dans objective_result, mets toujours un JSON: "
-            f"{{\"final_url\": \"...\", \"status\": \"success|error|ussd_sent|pending\", "
+            f"{{\"final_url\": \"...\", \"status\": \"success|error|pending\", "
             f"\"message\": \"ce qui est affiche a l'ecran\"}}"
         )
 
@@ -141,136 +160,51 @@ class DigikuntzAgent:
             except (json.JSONDecodeError, Exception):
                 pass
 
-        # 6b. Gather error signals from console + network (NOT page render).
-        #     When a network (e.g. Orange OM) is down, the Flutterwave page can
-        #     show an error and close instantly — the render watcher misses it,
-        #     but the console error / failed request / HTTP 4xx-5xx response on
-        #     the /charge endpoint is captured here.
-        error_signals = sb.get_error_signals()
-        result.error_signals = error_signals
-        has_error_signal = bool(
-            error_signals["console_errors"]
-            or error_signals["failed_requests"]
-            or error_signals["http_errors"]
-        )
-        ussd_detected = (
-            agent_status == "ussd_sent"
-            or "150*50" in agent_message
-            or "USSD" in agent_message.upper()
-        )
+        # Erreurs console/réseau, exposées (pas pour décider — pour l'audit).
+        result.error_signals = sb.get_error_signals()
 
-        # 7. Decide the outcome.
-        #  - The MOST authoritative evidence is the text the agent actually read
-        #    on the page after Pay (agent_message) and the raw /charge response.
-        #    We classify those FIRST (keywords), not the console noise.
-        #  - If USSD was sent, watch for a page change and react the instant it
-        #    happens (validation OR refusal) — no fixed 60s wait.
-        import asyncio
+        # L'IA pilote désormais TOUTE la phase d'attente USSD DANS la boucle de
+        # raisonnement (elle reste active après Payer, attend les changements via
+        # await_change, et conclut elle-même succès/échec). Le code n'a donc plus
+        # de watch qui juge. Ici on se contente de RECUEILLIR la conclusion.
 
+        # Cas 1 — la boucle a expiré (plafond 17min atteint sans que l'IA conclue).
+        # FAIT opérateur universel et mécanique (délai dépassé) -> 'expired', le
+        # numéro reste relançable tout de suite. Seule décision laissée au code,
+        # car ce n'est pas une interprétation (cf. CLAUDE.md, exception).
+        if loop_result.error == "deadline exceeded":
+            result.final_status = "expired"
+            result.final_message = (
+                "Délai de validation dépassé (17 min). La demande de paiement "
+                "a expiré côté opérateur. Vous pouvez relancer un paiement."
+            )
+            log.info("Boucle expirée (17min) -> expired")
+            result.payment_status = result.final_status
+            return
+
+        # Cas 2 — l'IA a conclu (statut métier). On respecte sa conclusion telle
+        # quelle ; on normalise juste 'success'/'error' vers le vocabulaire BD.
+        if loop_result.success and agent_status not in ("unknown", ""):
+            mapping = {"success": "successful", "error": "failed"}
+            result.final_status = mapping.get(agent_status, agent_status)
+            result.final_message = agent_message or result.final_status
+            result.payment_status = result.final_status
+            log.info("Verdict de l'IA: %s", result.final_status)
+            return
+
+        # Cas 3 — l'IA n'a rien conclu de net (boucle interrompue, parse error).
+        # Dernier recours: demander au LLM de juger le texte/charge disponible.
+        # On ne classifie PAS de signaux réseau bruts (faux network_down).
         charge_req = sb.get_flutterwave_charge()
         charge_body = charge_req.response_body if charge_req else ""
-        signals_text = json.dumps(error_signals, ensure_ascii=False) if has_error_signal else ""
-
-        # Si l'IA a déjà conclu avec un statut définitif (elle a vu payment-done,
-        # un message d'echec/succes clair), on respecte sa conclusion sans entrer
-        # dans le watch USSD — l'IA a la vision complète, le code ne la contourne pas.
-        agent_concluded = agent_status in ("error", "failed", "success", "cancelled")
-        if agent_concluded:
-            log.info("Agent a conclu status=%s — skip USSD watch", agent_status)
-
-        # USSD can also be inferred from the /charge response body (e.g. "dial").
-        # Mais seulement si l'IA n'a pas déjà conclu définitivement.
-        if not ussd_detected and not agent_concluded:
-            cb_hit = classifier.classify(charge_body)
-            if cb_hit and cb_hit[0] == "ussd_sent":
-                ussd_detected = True
-                log.info("USSD inferred from charge response (%r)", cb_hit[1])
-
-        if ussd_detected and not agent_concluded:
-            log.info("USSD sent! Watching for page change (react on change, no fixed wait)...")
-            await sb.watch_page_changes()
-            for i in range(60):  # safety cap 60s, but we break the instant anything changes
-                await asyncio.sleep(1)
-
-                # React the moment the page changes (validation or refusal).
-                watcher_status = await sb.get_page_status()
-                if watcher_status and watcher_status.get("status") in ("changed", "redirected"):
-                    page_text = watcher_status.get("message", "")
-                    log.info("Page changed (poll %d): %s", i + 1, page_text[:200])
-                    # ussd_sent=True: a failure here is a refusal/insufficient
-                    # funds, NOT a network problem.
-                    status, msg = await self._interpret(page_text, req.network, ussd_sent=True)
-                    result.final_status = status
-                    result.final_message = msg
-                    break
-
-                # Also react to a late error signal (charge rejected after USSD).
-                late = sb.get_error_signals()
-                late_text = json.dumps(late, ensure_ascii=False)
-                hit = classifier.classify(late_text)
-                if hit and hit[0] in ("failed", "cancelled", "network_down"):
-                    result.error_signals = late
-                    result.final_status = hit[0]
-                    result.final_message = self._friendly(
-                        hit[0], req.network, late_text[:300], ussd_sent=True)
-                    log.info("Late error matched %r -> %s (poll %d)", hit[1], hit[0], i + 1)
-                    break
-
-                # Fallback: URL redirect away from checkout = done.
-                try:
-                    current_url = await sb.current_url()
-                    if "flutterwave.com" not in current_url and \
-                       "checkout-v3-ui-prod" not in current_url and \
-                       "ravepay" not in current_url:
-                        status, msg = await self._interpret(
-                            f"redirected to {current_url}", req.network, ussd_sent=True
-                        )
-                        result.final_status = status or "redirected"
-                        result.final_message = msg or f"Redirected to {current_url}"
-                        break
-                except Exception as e:
-                    log.warning("Poll error: %s", e)
-            else:
-                result.final_status = "timeout"
-                result.final_message = "L'utilisateur n'a pas valide le USSD dans le delai imparti."
-                log.info("USSD validation timeout")
-        else:
-            # No USSD. Classify the authoritative texts in priority order:
-            #   1. the message the agent read on the page after Pay
-            #   2. the /charge response body
-            #   3. the captured error signals (console/network/HTTP)
-            decided = None
-            for src in (agent_message, charge_body, signals_text):
-                hit = classifier.classify(src)
-                if hit and hit[0] != "pending":
-                    decided = (hit[0], hit[1], src)
-                    break
-
-            if decided:
-                status, kw, src = decided
-                log.info("Keyword %r matched -> %s", kw, status)
-                result.final_status = status
-                # Use the authoritative source text (the one that matched the
-                # keyword) as context for _friendly, NOT agent_message which
-                # may be a generic "loader error" unrelated to the real cause.
-                result.final_message = self._friendly(
-                    status, req.network, src[:300]
-                )
-            else:
-                # Nothing matched any known keyword -> ask the LLM on the
-                # combined evidence; it returns a verdict + a new keyword to learn.
-                combined = "\n".join(filter(None, [
-                    f"Message lu par l'agent: {agent_message}" if agent_message else "",
-                    f"Reponse /charge: {charge_body}" if charge_body else "",
-                    f"Signaux d'erreur: {signals_text}" if signals_text else "",
-                ]))[:3000] or (agent_message or "(aucune information)")
-                log.info("No keyword match on agent/charge/signals -> LLM")
-                status, msg = await self._interpret(combined, req.network)
-                result.final_status = status or agent_status or "unknown"
-                result.final_message = msg
-
-        # Final status is decided; the generic runner captures charge/verify and
-        # sets success/captured_requests.
+        combined = "\n".join(filter(None, [
+            f"Message lu par l'agent: {agent_message}" if agent_message else "",
+            f"Reponse /charge: {charge_body}" if charge_body else "",
+        ]))[:3000] or (agent_message or "(aucune information)")
+        log.info("IA sans conclusion nette -> LLM juge le texte/charge")
+        status, msg = await self._interpret(combined, req.network)
+        result.final_status = status or "unknown"
+        result.final_message = msg
         result.payment_status = result.final_status
 
     def _friendly(self, status: str, network: str, raw: str,

@@ -10,6 +10,9 @@ Backend d'agrégation de paiements **Mobile Money** (XAF). MobileWallet rassembl
 DigiKUNTZ est le premier agrégateur. Le navigateur IA est **générique** (mutualisé) ;
 le curl replay est **propre à chaque agrégateur**.
 
+> Pour une **vision 360** (carte de tous les fichiers, rôle de chaque module, flux
+> d'un paiement, statuts, concurrence), voir **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
+
 ---
 
 ## Architecture
@@ -82,17 +85,26 @@ FastAPI génère automatiquement la doc OpenAPI :
 
 ## Endpoints
 
+**Endpoints CLIENT** (documentés dans Swagger) :
+
 | Méthode | Route | Rôle |
 |---|---|---|
 | GET | `/health` | statut + agrégateurs |
-| GET | `/aggregators` | modules disponibles |
+| GET | `/aggregators` | modules disponibles + réseaux supportés |
 | POST | `/pay` | exécuter un paiement (aggregator + mode) |
-| GET | `/transactions?aggregator=&limit=` | historique (Supabase) |
-| GET | `/status/{transaction_ref}` | statut d'une transaction |
-| GET | `/aggregators/{name}/template` | template curl actif d'un agrégateur |
-| POST | `/aggregators/{name}/template` | ajouter/mettre à jour manuellement le template |
-| POST | `/drive` | pilotage libre du navigateur (dev) |
-| POST | `/test-llm` | ping du LLM (dev) |
+| POST | `/transactions/{tx_id}/cancel` | débloquer une transaction `pending` |
+| GET/PUT | `/config/max-tabs` | seuil d'onglets par navigateur (concurrence) |
+
+**Endpoints ADMIN/DEBUG** (masqués de Swagger ; outils d'audit pour le backend) :
+`GET /transactions`, `GET /status/{ref}`, `GET /transactions/{ref}/trace`,
+`GET /transactions/{ref}/errors`, `GET|POST /aggregators/{name}/template`,
+`POST /drive`, `POST /test-llm`. *(À terme : endpoint admin protégé par auth — cf.
+`todo/migrer-vue-admin-endpoint-dedie.md`.)*
+
+> **Vue client vs admin** : `/pay` renvoie par défaut une **vue minimale**
+> (`success`, `status`, `message`, `transaction_id`, `code`). L'admin peut ajouter
+> `?debug=true` (non documenté dans Swagger) pour obtenir tout le détail technique
+> (charge/verify, curl déduit, tokens, trace…).
 
 ### `POST /pay`
 
@@ -193,6 +205,20 @@ fonctionnent par contrat.
 ## Tests manuels
 
 `POST /pay` déclenche une **vraie transaction** (et un prompt USSD `#150*50#` sur le
-téléphone). Utiliser un petit montant et un numéro contrôlé. Le mode replay reproduit le
-comportement réglé : retry ×3 sur le charge, polling `/verify` borné à **17 min** (horloge
-réelle), messages clairs « annulée par l'opérateur » / « échoué après USSD ».
+téléphone). Utiliser un petit montant et un numéro contrôlé.
+
+> **Tester avec `./start.sh`** (sans hot-reload). Le `./dev.sh` recharge sur tout
+> changement de `.py` et **coupe les requêtes `/pay` longues** (l'IA attend la
+> validation USSD jusqu'à 17 min) — Postman resterait en attente sans réponse.
+
+**Comportement clé des deux moteurs (aligné)** :
+- Après le clic Payer, l'**IA reste active** et attend la validation USSD jusqu'à
+  **17 min** (le délai opérateur). Elle ne conclut que sur un vrai résultat lu à
+  l'écran ; le code n'interprète pas à sa place.
+- Statuts finaux : `successful`, `failed` (refus / solde insuffisant),
+  `cancelled` (refus USSD), **`expired`** (17 min écoulées → **relançable tout de
+  suite**), `pending`. Pannes amont → **503** `network_unavailable` (API) ou
+  `operator_unavailable` (réseau opérateur dérangé).
+- Garde anti-doublon : seuls `pending` et `cancelled` bloquent un nouveau paiement
+  sur le même numéro ; `failed`/`expired`/pannes sont **immédiatement relançables**.
+- Replay : retry ×3 sur le charge, polling `/verify` borné à 17 min (horloge réelle).

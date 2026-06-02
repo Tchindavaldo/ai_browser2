@@ -261,6 +261,39 @@ class BrowserSession:
         except Exception:
             return None
 
+    async def wait_for_page_change(self, timeout_s: float, baseline: str | None = None):
+        """OBSERVATION PURE: bloque jusqu'à ce que la page change, sans rien juger.
+
+        Installe le watcher (idempotent), puis poll son drapeau jusqu'à détecter
+        un texte différent de `baseline` (l'état déjà vu par l'IA) OU une
+        redirection d'URL, OU l'expiration de `timeout_s`. Ne décide RIEN: retourne
+        juste le nouveau texte observé (str) ou None si rien n'a changé dans le
+        budget. C'est à l'IA d'interpréter ce texte au tour suivant.
+        """
+        import asyncio
+        await self.watch_page_changes()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            await asyncio.sleep(1)
+            st = await self.get_page_status()
+            if st and st.get("status") in ("changed", "redirected"):
+                txt = st.get("message", "")
+                if txt and txt != baseline:
+                    log.info("[%s] 👁 polling — page changée, texte vu:\n%s",
+                             self.sid, txt[:1000])
+                    return txt
+            # Redirection hors checkout = page de résultat (fait observable).
+            try:
+                url = self.page.url
+                if ("flutterwave.com" not in url
+                        and "checkout-v3-ui-prod" not in url
+                        and "ravepay" not in url):
+                    log.info("[%s] 👁 polling — redirection hors checkout: %s", self.sid, url)
+                    return f"redirected to {url}"
+            except Exception:
+                pass
+        return None
+
     async def hook_crypto(self):
         """Monkey-patch cryptico.encrypt to capture plaintext before encryption.
         Must be called AFTER the iframe content has loaded cryptico.js."""
@@ -609,12 +642,15 @@ class BrowserSession:
         return self.page.url
 
     async def close(self):
-        """Close this session's tab (the controller calls this on release)."""
+        """Fermer le CONTEXTE isolé de cette session (la contrôleur appelle au
+        release). Chaque session a son propre BrowserContext, donc fermer le
+        sien NE touche AUCUNE autre session (cookies/onglets séparés). On ferme
+        le contexte entier (pas juste la page) pour ne rien laisser fuir."""
         try:
-            if self.page:
-                await self.page.close()
-        except Exception:
-            pass
+            if self._context:
+                await self._context.close()
+        except Exception as e:
+            log.warning("[%s] close() context exception: %s", self.sid, e)
 
 
 class BrowserController:
@@ -650,7 +686,25 @@ class BrowserController:
         if not self._headless:
             launch_kwargs["channel"] = "chrome"
         browser = await self._pw.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(
+        # Pas de contexte partagé ici : chaque session crée le SIEN dans
+        # acquire_session (isolation cookies + fermeture sans impact sur les
+        # autres). 'open' compte les sessions/contextes actifs de ce Chrome.
+        entry = {"browser": browser, "open": 0}
+        self._browsers.append(entry)
+        log.info("Launched Chrome #%d (pool size=%d)", len(self._browsers), len(self._browsers))
+        return entry
+
+    async def acquire_session(self) -> BrowserSession:
+        """Open an isolated session (its own BrowserContext) for one transaction.
+
+        Picks a Chrome with spare capacity (< max_tabs sessions); launches a new
+        Chrome if all current ones are full. Each session gets a DEDICATED
+        context so closing one never affects another (no shared cookies/tabs).
+        """
+        entry = next((b for b in self._browsers if b["open"] < self.max_tabs), None)
+        if entry is None:
+            entry = await self._launch_browser()
+        context = await entry["browser"].new_context(
             viewport={"width": 1280, "height": 900},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -658,27 +712,13 @@ class BrowserController:
                 "Chrome/130.0.0.0 Safari/537.36"
             ),
         )
-        entry = {"browser": browser, "context": context, "open": 0}
-        self._browsers.append(entry)
-        log.info("Launched Chrome #%d (pool size=%d)", len(self._browsers), len(self._browsers))
-        return entry
-
-    async def acquire_session(self) -> BrowserSession:
-        """Open an isolated tab for one transaction.
-
-        Picks a Chrome with spare capacity (< max_tabs open tabs); launches a new
-        Chrome if all current ones are full.
-        """
-        entry = next((b for b in self._browsers if b["open"] < self.max_tabs), None)
-        if entry is None:
-            entry = await self._launch_browser()
         self._sid_counter += 1
         sid = f"s{self._sid_counter}"
-        session = BrowserSession(self, entry["context"], sid)
+        session = BrowserSession(self, context, sid)
         session._pool_entry = entry
         await session.open()
         entry["open"] += 1
-        log.info("[%s] Session acquise (Chrome a %d/%d onglets)",
+        log.info("[%s] Session acquise (Chrome a %d/%d sessions)",
                  sid, entry["open"], self.max_tabs)
         return session
 
@@ -688,7 +728,7 @@ class BrowserController:
         entry = getattr(session, "_pool_entry", None)
         if entry is not None:
             entry["open"] = max(0, entry["open"] - 1)
-            log.info("[%s] Session libérée (Chrome a %d/%d onglets)",
+            log.info("[%s] Session libérée (Chrome a %d/%d sessions)",
                      session.sid, entry["open"], self.max_tabs)
 
     async def stop(self):

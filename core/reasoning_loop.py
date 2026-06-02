@@ -29,13 +29,20 @@ Schema exact:
     }, ...
   ],
   "objective_reached": bool,
-  "objective_result": string (resume final si reached=true)
+  "objective_result": string (resume final si reached=true),
+  "await_change": bool (optionnel)
 }
 
 Regles: utilise des selecteurs CSS courts et stables (prefere [data-id],
 [name], #id a .class generique). N'inclus jamais d'action si tu n'es pas
 sur de l'element. Si l'objectif est atteint, mets objective_reached=true
-et un actions:[] vide."""
+et un actions:[] vide.
+
+await_change: mets-le a true quand tu as fini d'agir et que tu dois ATTENDRE
+qu'un evenement exterieur change la page (ex: tu attends que l'utilisateur
+valide le USSD sur son telephone). Le systeme attendra alors qu'un changement
+reel de page survienne avant de te redonner la main — inutile de faire des
+'wait' repetes. Tu peux mettre await_change=true avec actions:[] vide."""
 
 
 @dataclass
@@ -44,6 +51,7 @@ class AgentDecision:
     actions: list[dict] = field(default_factory=list)
     objective_reached: bool = False
     objective_result: str = ""
+    await_change: bool = False  # l'IA attend un changement de page avant de re-juger
     raw_json: str = ""
 
     @classmethod
@@ -63,6 +71,7 @@ class AgentDecision:
             d.actions = obj.get("actions", [])
             d.objective_reached = obj.get("objective_reached", False)
             d.objective_result = obj.get("objective_result", "")
+            d.await_change = obj.get("await_change", False)
         except (json.JSONDecodeError, ValueError) as e:
             log.error("Failed to parse LLM response: %s\nText: %s", e, text[:500])
             d.thought = f"PARSE ERROR: {e}"
@@ -114,14 +123,26 @@ class ReasoningLoop:
         self._url_history: list[str] = []
         result = LoopResult()
 
-        for turn in range(self.max_turns):
+        # `turn` = compteur de tours d'ACTION (borné par max_turns). Les tours
+        # d'ATTENTE passive (await_change, ex. validation USSD) ne le consomment
+        # PAS : ils sont bornés par le temps (max_elapsed_s = 17min), pas par un
+        # nombre de tours — sinon l'attente épuiserait max_turns avant que
+        # l'utilisateur valide. `n` = numéro de tour affiché (monotone).
+        turn = 0
+        n = 0
+        hit_max_turns = False
+        while True:
             if not self._running:
                 result.error = "stopped"
                 break
+            if turn >= self.max_turns:
+                hit_max_turns = True
+                break
 
-            result.turns = turn + 1
-            n = turn + 1
-            log.info("┌─ 🤖 IA tour %d/%d ─────────────────────", n, self.max_turns)
+            n += 1
+            result.turns = n
+            log.info("┌─ 🤖 IA tour %d (action %d/%d) ─────────────────────",
+                     n, turn + 1, self.max_turns)
 
             # 1. Snapshot
             try:
@@ -143,7 +164,7 @@ class ReasoningLoop:
                 break
 
             # 2. Build prompt and send to LLM
-            user_content = self._build_user_content(snap, objective, turn)
+            user_content = self._build_user_content(snap, objective, n)
             llm_resp = await self.llm.send(SYSTEM_PROMPT, user_content)
 
             result.total_input_tokens += llm_resp.input_tokens
@@ -177,15 +198,46 @@ class ReasoningLoop:
                 result.result = decision.objective_result
                 break
 
+            # ATTENTE PASSIVE (await_change) : l'IA a fini d'agir et attend qu'un
+            # évènement extérieur change la page (ex. validation USSD). Le code
+            # OBSERVE jusqu'au prochain changement (fait mécanique, sans juger),
+            # puis redonne la main à l'IA SANS consommer de tour d'action — la
+            # phase d'attente est bornée par le temps (max_elapsed_s), pas par
+            # max_turns. On exécute d'abord les éventuelles actions du tour.
+            if decision.await_change:
+                for action in decision.actions:
+                    await self._execute_action(action)
+                log.info("└────────────────────────────────────────")
+                if snap.deadline_exceeded:
+                    log.warning("│ ⏱ délai (%ss) dépassé — arrêt boucle", self.max_elapsed_s)
+                    result.error = "deadline exceeded"
+                    break
+                remaining = None
+                if self.max_elapsed_s is not None:
+                    remaining = self.max_elapsed_s - (_time.time() - self._started_at)
+                    if remaining <= 0:
+                        result.error = "deadline exceeded"
+                        break
+                budget = min(remaining, 1020) if remaining is not None else 1020
+                baseline = (snap.outer_html or "")[:500]
+                log.info("│ ⏳ attente passive d'un changement de page (max %ds)…", int(budget))
+                changed = await self.browser.wait_for_page_change(budget, baseline=baseline)
+                if changed is None:
+                    log.info("│ ⏳ aucun changement dans le budget — l'IA réévaluera")
+                # NE PAS incrémenter `turn` : c'était une attente, pas une action.
+                continue
+
             if not decision.actions:
                 log.warning("│ ⚠️  aucune action proposée, tour ignoré")
                 log.info("└────────────────────────────────────────")
+                turn += 1
                 continue
 
-            # 4. Execute actions
+            # 4. Execute actions (tour d'action — consomme un tour).
             for action in decision.actions:
                 await self._execute_action(action)
             log.info("└────────────────────────────────────────")
+            turn += 1
 
             # Filet de sécurité 17 min : l'IA a vu "DÉLAI DÉPASSÉ" dans le header
             # de ce tour et a quand même choisi d'agir plutôt que de conclure. On
@@ -197,7 +249,7 @@ class ReasoningLoop:
                 result.error = "deadline exceeded"
                 break
 
-        else:
+        if hit_max_turns:
             result.error = "max turns reached"
 
         self._running = False
@@ -272,6 +324,32 @@ class ReasoningLoop:
 
         frame_info = (f" | iframe s'est détachée {snap.frame_detached_count}x"
                       if snap.frame_detached_count > 0 else "")
+        # Fait observable: Payer a-t-il déjà été cliqué ? Deux preuves —
+        #  (a) un POST /charge dans les réponses réseau (paiement réellement parti),
+        #  (b) un clic submit/Payer réussi dans l'historique d'actions (même AVANT
+        #      que le /charge n'apparaisse — c'est le cas qui causait le double-clic).
+        # Si l'une est vraie, on l'affiche en gros pour que l'IA NE recharge PAS.
+        # Le code ne décide pas, il rapporte le fait.
+        charge_sent = any(
+            r.get("method") == "POST" and "/charge" in r.get("url", "")
+            for r in snap.recent_responses
+        )
+        pay_clicked = any(
+            ("click" in a.lower()) and ("[OK]" in a)
+            and ("submit" in a.lower() or "btn" in a.lower()
+                 or "payer" in a.lower() or "pay" in a.lower())
+            for a in self.action_history
+        )
+        charge_info = ""
+        if charge_sent or pay_clicked:
+            charge_info = (
+                "\n\n⚠️ PAIEMENT DÉJÀ SOUMIS: tu as déjà cliqué Payer (voir "
+                "HISTORIQUE D'ACTIONS / appel /charge). NE RECHARGE PAS, ne "
+                "re-remplis pas, ne re-clique pas Payer — tu enverrais un 2e "
+                "paiement (double débit). Le formulaire disparaît et un loader "
+                "s'affiche: c'est NORMAL. ATTENDS (wait) et LIS le résultat "
+                "(USSD #150*50#, succès, ou échec)."
+            )
         deadline_info = ""
         if snap.deadline_exceeded:
             mins = int(snap.elapsed_s // 60)
@@ -284,7 +362,7 @@ class ReasoningLoop:
                 f"validation dépassé ({mins} min) — transaction non confirmée à temps\"}}."
             )
         text = (
-            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}{deadline_info}\n\n"
+            f"TOUR #{turn} | {snap.elapsed_s}s depuis le debut{frame_info}{charge_info}{deadline_info}\n\n"
             f"OBJECTIF: {objective}\n\n"
             f"URL ACTUELLE: {snap.url}"
             f"{url_history_str}"
