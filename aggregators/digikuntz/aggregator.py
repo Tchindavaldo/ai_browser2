@@ -102,8 +102,8 @@ class DigikuntzAggregator(Aggregator):
         return None
 
     # --- browser mode (full AI-driven flow) ---
-    async def pay_via_browser(self, req: PaymentRequest) -> PaymentResult:
-        return await run_browser_flow(self, req)
+    async def pay_via_browser(self, req: PaymentRequest, tx_id: int | None = None) -> PaymentResult:
+        return await run_browser_flow(self, req, tx_id=tx_id)
 
     # --- replay mode (no browser) ---
     async def replay(self, req: PaymentRequest, template: CurlTemplate) -> PaymentResult:

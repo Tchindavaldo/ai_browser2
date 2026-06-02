@@ -34,6 +34,49 @@ STATUS_MAP = {
 _TERMINAL = {"successful", "failed", "cancelled"}
 
 
+# ---------------------------------------------------------------------------
+# Registre webhook ⇄ polling — une "boîte aux lettres" par transaction.
+#
+# Le webhook (endpoint POST) et le polling (dans /pay) surveillent le MÊME
+# paiement. Le premier qui obtient un verdict terminal le DÉPOSE ici ; l'autre
+# le voit et s'arrête. Indexé par transactionId (provider, unique) -> aucune
+# collision entre transactions parallèles. État mémoire (process unique).
+# ---------------------------------------------------------------------------
+class _Registry:
+    def __init__(self):
+        self._events: dict[str, asyncio.Event] = {}
+        self._verdicts: dict[str, dict] = {}
+
+    def register(self, tx_id: str) -> asyncio.Event:
+        """Ouvre une boîte pour cette transaction (appelé par le polling)."""
+        ev = asyncio.Event()
+        self._events[tx_id] = ev
+        return ev
+
+    def deliver(self, tx_id: str, verdict: dict) -> bool:
+        """Dépose un verdict terminal (appelé par le webhook OU le polling).
+
+        Retourne True si une boîte attendait (donc on a réveillé l'autre).
+        """
+        self._verdicts[tx_id] = verdict
+        ev = self._events.get(tx_id)
+        if ev is not None and not ev.is_set():
+            ev.set()
+            return True
+        return False
+
+    def take_verdict(self, tx_id: str) -> dict | None:
+        return self._verdicts.get(tx_id)
+
+    def close(self, tx_id: str):
+        """Ferme la boîte (le polling l'appelle en fin de transaction)."""
+        self._events.pop(tx_id, None)
+        self._verdicts.pop(tx_id, None)
+
+
+registry = _Registry()
+
+
 def _headers() -> dict:
     return {
         "content-type": "application/json",
@@ -84,25 +127,45 @@ async def poll_until_terminal(
     deadline = time.monotonic() + timeout_s
     last = None
     i = 0
+    # Ouvre la boîte du registre : si le WEBHOOK reçoit le terminal avant nous,
+    # il le dépose ici et on s'arrête immédiatement (pas d'attente du prochain tick).
+    ev = registry.register(transaction_id)
     log.info("status_poll: début polling %s (max %ds, intervalle %ss)",
              transaction_id, timeout_s, interval_s)
-    while time.monotonic() < deadline:
-        i += 1
-        res = await fetch_status(transaction_id)
-        if res is not None:
-            last = res
-            if res["internal"] != (last or {}).get("_logged"):
+    try:
+        while time.monotonic() < deadline:
+            # Le webhook a-t-il déjà livré un verdict terminal ?
+            if ev.is_set():
+                v = registry.take_verdict(transaction_id)
+                if v:
+                    log.info("status_poll: %s — verdict reçu par WEBHOOK: %s",
+                             transaction_id, v.get("status"))
+                    return v
+            i += 1
+            res = await fetch_status(transaction_id)
+            if res is not None:
+                last = res
                 log.info("status_poll %s (#%d): %s (raw=%s)",
                          transaction_id, i, res["internal"], res["raw"])
-            if res["internal"] in _TERMINAL:
-                return {"status": res["internal"], "raw": res["raw"], "data": res["data"]}
-        await asyncio.sleep(interval_s)
+                if res["internal"] in _TERMINAL:
+                    verdict = {"status": res["internal"], "raw": res["raw"], "data": res["data"]}
+                    # On a détecté en PREMIER : on dépose pour réveiller un
+                    # éventuel doublon, mais surtout on conclut.
+                    registry.deliver(transaction_id, verdict)
+                    return verdict
+            # Attente interrompue tôt si le webhook livre pendant le sleep.
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=interval_s)
+            except asyncio.TimeoutError:
+                pass
 
-    # Délai dépassé sans terminal. pending 17min -> expired (annulé opérateur).
-    log.info("status_poll: %s — délai %ds écoulé sans verdict terminal -> expired",
-             transaction_id, timeout_s)
-    return {
-        "status": "expired",
-        "raw": (last or {}).get("raw", ""),
-        "data": (last or {}).get("data"),
-    }
+        # Délai dépassé sans terminal. pending 17min -> expired (annulé opérateur).
+        log.info("status_poll: %s — délai %ds écoulé sans verdict terminal -> expired",
+                 transaction_id, timeout_s)
+        return {
+            "status": "expired",
+            "raw": (last or {}).get("raw", ""),
+            "data": (last or {}).get("data"),
+        }
+    finally:
+        registry.close(transaction_id)

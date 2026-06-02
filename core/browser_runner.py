@@ -29,20 +29,18 @@ async def run_browser_flow(
     req: PaymentRequest,
     *,
     max_turns: int = 22,
+    tx_id: int | None = None,
 ) -> PaymentResult:
     """Drive the full AI checkout for `aggregator` and return a PaymentResult.
 
     Acquires an isolated `BrowserSession` (its own tab + network capture + active
     frame) from the controller's pool so concurrent payments never collide, and
-    releases it when done.
+    releases it when done. `tx_id` (DB row) lets us persist the provider id as
+    soon as the transaction is created, so the webhook can find it during payment.
     """
-    llm = aggregator.llm
-    result = PaymentResult()
-
-    # 0. Acquire an isolated browser session (one tab) for THIS transaction.
     browser = await aggregator.browser.acquire_session()
     try:
-        return await _run_browser_flow_in_session(aggregator, req, browser, max_turns)
+        return await _run_browser_flow_in_session(aggregator, req, browser, max_turns, tx_id)
     finally:
         await aggregator.browser.release_session(browser)
 
@@ -52,6 +50,7 @@ async def _run_browser_flow_in_session(
     req: PaymentRequest,
     browser,  # BrowserSession
     max_turns: int,
+    tx_id: int | None = None,
 ) -> PaymentResult:
     """Body of the flow, running entirely on one isolated session."""
     llm = aggregator.llm
@@ -69,6 +68,11 @@ async def _run_browser_flow_in_session(
 
     result.transaction_id = tx.get("transactionRef", "")
     result.provider_transaction_id = tx.get("providerTransactionId", "")
+    # Persiste l'id provider DÈS MAINTENANT (avant le polling) pour que le webhook
+    # puisse retrouver cette transaction pendant le paiement.
+    if tx_id is not None and result.provider_transaction_id:
+        from core.db import db
+        await db.set_provider_id(tx_id, result.provider_transaction_id)
     payment_link = tx.get("paymentLink", "")
     if not payment_link:
         result.error = f"No paymentLink in response: {tx}"

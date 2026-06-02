@@ -187,7 +187,7 @@ class Aggregator(ABC):
 
     # --- browser mode (full AI-driven flow) ---
     @abstractmethod
-    async def pay_via_browser(self, req: PaymentRequest) -> PaymentResult:
+    async def pay_via_browser(self, req: PaymentRequest, tx_id: int | None = None) -> PaymentResult:
         """Run the full browser-IA flow and return the result."""
 
     # --- result interpretation (interpret_charge/verify/ping + _interpret) ---

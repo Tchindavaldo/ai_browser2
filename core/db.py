@@ -126,12 +126,71 @@ class Database:
             log.warning("insert_pending failed: %s", e)
             return None
 
+    async def set_provider_id(self, tx_id: int, provider_id: str) -> None:
+        """Enregistre l'id provider (DigiKUNTZ) DÈS qu'il est connu (création de
+        transaction), pour que le webhook puisse retrouver cette ligne pendant le
+        paiement (avant le settle final). No-op si BD désactivée / id vide."""
+        if not self.enabled or tx_id is None or not provider_id:
+            return
+
+        def _update():
+            (self._client.table("transactions")
+                 .update({"provider_transaction_id": provider_id})
+                 .eq("id", tx_id).execute())
+
+        try:
+            await asyncio.to_thread(_update)
+        except Exception as e:  # noqa: BLE001
+            log.warning("set_provider_id failed: %s", e)
+
+    async def get_transaction_by_provider_id(self, provider_id: str) -> dict | None:
+        """Retrouve une transaction par son id provider (pour le webhook)."""
+        if not self.enabled or not provider_id:
+            return None
+
+        def _select():
+            res = (self._client.table("transactions").select("*")
+                   .eq("provider_transaction_id", provider_id).limit(1).execute())
+            return res.data[0] if res.data else None
+
+        try:
+            return await asyncio.to_thread(_select)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_transaction_by_provider_id failed: %s", e)
+            return None
+
+    async def update_status_by_provider_id(
+        self, provider_id: str, status: str, message: str = ""
+    ) -> None:
+        """MAJ le statut d'une transaction via son id provider (appelé par le
+        webhook). Idempotent : n'écrase PAS un verdict terminal déjà posé."""
+        if not self.enabled or not provider_id:
+            return
+        _TERMINAL = {"successful", "failed", "cancelled", "expired"}
+        patch = {"status": status, "success": status == "successful"}
+        if message:
+            patch["message"] = message
+
+        def _update():
+            q = (self._client.table("transactions")
+                 .update(patch)
+                 .eq("provider_transaction_id", provider_id))
+            # Idempotence: ne pas réécrire une ligne déjà sur un statut terminal.
+            q = q.not_.in_("status", list(_TERMINAL))
+            q.execute()
+
+        try:
+            await asyncio.to_thread(_update)
+        except Exception as e:  # noqa: BLE001
+            log.warning("update_status_by_provider_id failed: %s", e)
+
     async def update_transaction(self, tx_id: int, result: PaymentResult) -> None:
         """Update a pending row with the final verdict once the payment settles."""
         if not self.enabled or tx_id is None:
             return
         patch = {
             "transaction_ref": result.transaction_id,
+            "provider_transaction_id": result.provider_transaction_id or None,
             "status": result.final_status or result.payment_status or "unknown",
             "message": result.final_message,
             "success": result.success,
