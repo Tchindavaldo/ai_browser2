@@ -41,6 +41,12 @@ Regles: utilise des selecteurs CSS courts et stables (prefere [data-id],
 sur de l'element. Si l'objectif est atteint, mets objective_reached=true
 et un actions:[] vide.
 
+SELECT: "value" doit etre une CHAINE (la value brute d'une option), JAMAIS un
+objet. Choisis l'option voulue dans son champ "options" et recopie SEULEMENT son
+"value". Ex: options=[{"value":"ORANGEMONEY","label":"Orange Money"}] ->
+{"type":"select","selector":"select[name='reseau']","value":"ORANGEMONEY"}.
+N'ecris PAS value={"value":"ORANGEMONEY",...} ni value="Orange Money".
+
 await_change: mets-le a true quand tu as fini d'agir et que tu dois ATTENDRE
 qu'un evenement exterieur change la page (ex: tu attends que l'utilisateur
 valide le USSD sur son telephone). Le systeme attendra alors qu'un changement
@@ -385,6 +391,13 @@ class ReasoningLoop:
         action_type = action.get("type", "")
         selector = action.get("selector", "")
         value = action.get("value", "")
+
+        # Robustesse: pour un select, le LLM recopie parfois l'OBJET option entier
+        # ({"value": "...", "label": "..."}) au lieu de sa seule "value" — ce qui
+        # finit en "[object Object]" et ne matche aucune option. On extrait alors
+        # la value réelle (sans rien décider : on corrige juste la forme).
+        if isinstance(value, dict):
+            value = value.get("value", value.get("label", ""))
 
         label = f"{action_type} {selector}"
         if value:
