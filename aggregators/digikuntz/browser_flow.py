@@ -9,6 +9,7 @@ from core.base import PaymentRequest, PaymentResult
 from core.browser import BrowserController
 from core.llm_client import LlmClient
 from core import classifier
+from . import status_poll
 
 log = logging.getLogger("ai_browser2")
 
@@ -91,27 +92,21 @@ class DigikuntzAgent:
             f"d'authentification — session de paiement perdue\"}}.\n"
             f"- Ne perds jamais de vue ton objectif: payer via mobile money. Tu ne "
             f"dois JAMAIS creer de compte ni te connecter.\n\n"
-            f"APRES LE CLIC PAYER — TU N'AS PAS ENCORE FINI:\n"
-            f"  - Si tu vois '#150*50#' / 'USSD' / 'dial' / 'composez' / 'en cours "
-            f"de traitement' : le paiement attend la validation de l'utilisateur "
-            f"sur son telephone. Ce N'EST PAS une conclusion. NE conclus PAS "
-            f"'ussd_sent' comme objectif atteint. A la place: actions:[] vide ET "
-            f"await_change=true — tu attends que la page change (validation ou "
-            f"refus). Le systeme te redonnera la main quand la page bougera.\n"
-            f"  - Continue ainsi jusqu'a voir un VRAI resultat final.\n\n"
-            f"L'objectif est REELLEMENT ATTEINT (objective_reached=true) seulement si:\n"
-            f"  a) La page affiche un message clair de SUCCES apres validation → success\n"
-            f"  b) La page affiche un ECHEC / refus / solde insuffisant → error\n"
-            f"  c) L'URL de la page principale contient 'payment-done' ou "
-            f"'payments.digikuntz.com' → page de resultat DigiKUNTZ: LIS son contenu "
-            f"(status=failed/success) et conclus\n"
-            f"  d) Tu es redirige vers une page inconnue qui montre un resultat → conclus\n"
-            f"  e) Header 'DÉLAI DÉPASSÉ' (plafond atteint) ET pas de succes → conclus "
-            f"error (le delai operateur est ecoule).\n"
-            f"Tant qu'aucun de ces cas n'est vrai apres Payer, NE conclus PAS: "
-            f"await_change=true et attends.\n\n"
+            f"TON TRAVAIL S'ARRETE DES QUE L'USSD EST DEMANDE — conclus IMMEDIATEMENT "
+            f"(objective_reached=true) dans l'un de ces cas:\n"
+            f"  a) Tu vois '#150*50#' / 'USSD' / 'dial' / 'composez' / 'en cours de "
+            f"traitement' / 'autoriser ce paiement' apres le clic Payer → status "
+            f"'ussd_sent'. Le client doit valider sur son telephone ; ce n'est PAS "
+            f"a toi d'attendre la validation — le backend suit le statut ensuite. "
+            f"NE recharge pas, NE re-clique pas, conclus tout de suite.\n"
+            f"  b) La page affiche un ECHEC / refus / solde insuffisant AVANT tout "
+            f"USSD → status 'error'.\n"
+            f"  c) Page de resultat DigiKUNTZ (URL 'payment-done' / "
+            f"'payments.digikuntz.com') deja affichee → LIS le status et conclus.\n"
+            f"  d) Header 'DÉLAI DÉPASSÉ' (plafond) sans USSD ni succes → 'error'.\n"
+            f"N'utilise PAS await_change : tu n'attends jamais la validation USSD.\n\n"
             f"Dans objective_result, mets toujours un JSON: "
-            f"{{\"final_url\": \"...\", \"status\": \"success|error|pending\", "
+            f"{{\"final_url\": \"...\", \"status\": \"ussd_sent|success|error\", "
             f"\"message\": \"ce qui est affiche a l'ecran\"}}"
         )
 
@@ -182,19 +177,53 @@ class DigikuntzAgent:
             result.payment_status = result.final_status
             return
 
-        # Cas 2 — l'IA a conclu (statut métier). On respecte sa conclusion telle
-        # quelle ; on normalise juste 'success'/'error' vers le vocabulaire BD.
+        # Cas 2 — USSD demandé au client : le navigateur a FINI son travail.
+        # Le statut final ne vient PAS de l'écran (coûteux, peu fiable) mais du
+        # POLLING STATUT DigiKUNTZ (source de vérité), jusqu'à terminal ou 17min.
+        # Un pending qui dure 17min = expiré (annulé opérateur). Le webhook, s'il
+        # est joignable, met à jour en parallèle (cf. /webhook) — le polling reste
+        # le mécanisme fiable en local.
+        ussd_detected = (
+            agent_status in ("ussd_sent", "pending")
+            or "150*50" in agent_message
+            or "USSD" in agent_message.upper()
+        )
+        if ussd_detected and result.provider_transaction_id:
+            log.info("USSD demandé — délégation au polling statut DigiKUNTZ (tx=%s)",
+                     result.provider_transaction_id)
+            poll = await status_poll.poll_until_terminal(result.provider_transaction_id)
+            result.final_status = poll["status"]
+            result.final_message = self._friendly(
+                poll["status"], req.network,
+                json.dumps(poll.get("data") or {}, ensure_ascii=False)[:300],
+                ussd_sent=True,
+            )
+            result.payment_status = result.final_status
+            log.info("Verdict polling statut: %s", result.final_status)
+            return
+
+        # Cas 3 — l'IA a conclu un statut métier AVANT l'USSD (échec immédiat au
+        # charge, solde insuffisant lu à l'écran…). On respecte sa conclusion.
         if loop_result.success and agent_status not in ("unknown", ""):
             mapping = {"success": "successful", "error": "failed"}
             result.final_status = mapping.get(agent_status, agent_status)
             result.final_message = agent_message or result.final_status
             result.payment_status = result.final_status
-            log.info("Verdict de l'IA: %s", result.final_status)
+            log.info("Verdict de l'IA (avant USSD): %s", result.final_status)
             return
 
-        # Cas 3 — l'IA n'a rien conclu de net (boucle interrompue, parse error).
-        # Dernier recours: demander au LLM de juger le texte/charge disponible.
-        # On ne classifie PAS de signaux réseau bruts (faux network_down).
+        # Cas 4 — pas de conclusion nette. Si on a un id provider, on tente quand
+        # même le polling (la transaction existe peut-être côté DigiKUNTZ) ;
+        # sinon dernier recours LLM sur le texte/charge.
+        if result.provider_transaction_id:
+            log.info("Pas de conclusion IA — polling statut DigiKUNTZ par sécurité")
+            poll = await status_poll.poll_until_terminal(result.provider_transaction_id)
+            result.final_status = poll["status"]
+            result.final_message = self._friendly(
+                poll["status"], req.network,
+                json.dumps(poll.get("data") or {}, ensure_ascii=False)[:300], ussd_sent=True)
+            result.payment_status = result.final_status
+            return
         charge_req = sb.get_flutterwave_charge()
         charge_body = charge_req.response_body if charge_req else ""
         combined = "\n".join(filter(None, [
@@ -314,5 +343,11 @@ class DigikuntzAgent:
             data = resp.json()
 
             # Response: {"id":"...", "status":"payin_pending", "data":{"paymentLink":"...", "transactionRef":"..."}}
-            inner = data.get("data", data)
+            # `id` (racine) = l'identifiant pour le polling statut DigiKUNTZ
+            # (GET /transaction?transactionId=). On le propage dans inner sous
+            # 'providerTransactionId' pour le runner/outcome.
+            inner = dict(data.get("data", data))
+            provider_id = data.get("id") or inner.get("id")
+            if provider_id:
+                inner["providerTransactionId"] = provider_id
             return inner

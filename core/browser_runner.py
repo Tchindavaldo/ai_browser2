@@ -68,6 +68,7 @@ async def _run_browser_flow_in_session(
         return result
 
     result.transaction_id = tx.get("transactionRef", "")
+    result.provider_transaction_id = tx.get("providerTransactionId", "")
     payment_link = tx.get("paymentLink", "")
     if not payment_link:
         result.error = f"No paymentLink in response: {tx}"

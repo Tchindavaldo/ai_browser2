@@ -33,6 +33,8 @@ class PaymentResult:
     # quand l'API agrégateur amont est en panne. None = pas d'erreur catégorisée.
     error_code: str = ""
     transaction_id: str = ""
+    # Identifiant provider (DigiKUNTZ `id`) pour le polling statut après USSD.
+    provider_transaction_id: str = ""
     payment_status: str = ""
     turns: int = 0
     input_tokens: int = 0
