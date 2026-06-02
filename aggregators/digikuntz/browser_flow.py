@@ -205,49 +205,47 @@ class DigikuntzAgent:
             watch_budget = settings.retry_window_s
             log.info("USSD sent! Watching for page change (budget=%ds, react on change)...",
                      watch_budget)
+            # WATCH PASSIF (option 3): le code se contente d'OBSERVER si l'écran
+            # bouge (changement de texte ou redirection d'URL) — il ne JUGE
+            # jamais (pas de classifier sur les signaux réseau bruts, qui causait
+            # de faux 'network_down' sur un simple asset ERR_ABORTED). Dès que la
+            # page change, on redonne la main à l'IA: ELLE lit le nouvel état et
+            # conclut succès / refus / attente.
             await sb.watch_page_changes()
+            decided = False
             for i in range(watch_budget):  # plafond = délai opérateur; break dès qu'il se passe qqch
                 await asyncio.sleep(1)
 
-                # React the moment the page changes (validation or refusal).
+                # (a) Le texte de la page a changé OU l'URL a redirigé ? -> l'IA lit.
+                changed_text = None
                 watcher_status = await sb.get_page_status()
                 if watcher_status and watcher_status.get("status") in ("changed", "redirected"):
-                    page_text = watcher_status.get("message", "")
-                    log.info("Page changed (poll %d): %s", i + 1, page_text[:200])
-                    # ussd_sent=True: a failure here is a refusal/insufficient
-                    # funds, NOT a network problem.
-                    status, msg = await self._interpret(page_text, req.network, ussd_sent=True)
+                    changed_text = watcher_status.get("message", "")
+
+                # (b) Redirection hors du checkout = page de résultat -> l'IA lit.
+                if changed_text is None:
+                    try:
+                        current_url = await sb.current_url()
+                        if ("flutterwave.com" not in current_url
+                                and "checkout-v3-ui-prod" not in current_url
+                                and "ravepay" not in current_url):
+                            changed_text = f"redirected to {current_url}"
+                    except Exception as e:
+                        log.warning("Poll error: %s", e)
+
+                if changed_text is not None:
+                    log.info("Page changée (poll %d) — l'IA interprète: %s",
+                             i + 1, changed_text[:200])
+                    # _interpret demande au LLM de juger le texte RÉEL de la page
+                    # (ussd_sent=True: un échec ici = refus utilisateur / solde,
+                    # pas un problème réseau). Le code ne décide pas.
+                    status, msg = await self._interpret(changed_text, req.network, ussd_sent=True)
                     result.final_status = status
                     result.final_message = msg
+                    decided = True
                     break
 
-                # Also react to a late error signal (charge rejected after USSD).
-                late = sb.get_error_signals()
-                late_text = json.dumps(late, ensure_ascii=False)
-                hit = classifier.classify(late_text)
-                if hit and hit[0] in ("failed", "cancelled", "network_down"):
-                    result.error_signals = late
-                    result.final_status = hit[0]
-                    result.final_message = self._friendly(
-                        hit[0], req.network, late_text[:300], ussd_sent=True)
-                    log.info("Late error matched %r -> %s (poll %d)", hit[1], hit[0], i + 1)
-                    break
-
-                # Fallback: URL redirect away from checkout = done.
-                try:
-                    current_url = await sb.current_url()
-                    if "flutterwave.com" not in current_url and \
-                       "checkout-v3-ui-prod" not in current_url and \
-                       "ravepay" not in current_url:
-                        status, msg = await self._interpret(
-                            f"redirected to {current_url}", req.network, ussd_sent=True
-                        )
-                        result.final_status = status or "redirected"
-                        result.final_message = msg or f"Redirected to {current_url}"
-                        break
-                except Exception as e:
-                    log.warning("Poll error: %s", e)
-            else:
+            if not decided:
                 # Budget écoulé (17 min) sans validation : même verdict que le
                 # replay — l'opérateur a auto-annulé la transaction non validée
                 # dans le délai. 'cancelled' (et non 'timeout') pour cohérence
