@@ -605,6 +605,11 @@ class BrowserSession:
                         label: (o.label || o.textContent || '').trim().slice(0, 80),
                         selected: o.selected,
                     }));
+                    // el.value peut valoir "[object Object]" sur certains selects
+                    // Vue.js (Flutterwave) — le LLM le recopiait tel quel. On force
+                    // value = la value de l'option sélectionnée (ou '' si aucune).
+                    const sel = el.selectedOptions && el.selectedOptions[0];
+                    entry.value = sel ? sel.value : '';
                 }
                 results.push(entry);
             }
@@ -631,9 +636,47 @@ class BrowserSession:
         await frame.fill(selector, value, timeout=10000)
 
     async def select(self, selector: str, value: str):
+        """Choisir une option d'un <select>.
+
+        Playwright matche `value` contre la value OU le label de l'option. On
+        gère deux formes dégénérées que le LLM produit parfois (sans rien décider
+        à sa place — on corrige juste la forme) :
+          - "[object Object]" : le LLM a stringifié l'objet option entier ; on
+            retombe alors sur un match par LABEL (le libellé que le LLM voulait).
+          - value qui ne matche aucune option : on tente un match par label.
+        """
         frame = self._active_frame or self.page
         log.info("[%s] Action: select(%s, %s)", self.sid, selector, value)
-        await frame.select_option(selector, value, timeout=10000)
+        is_objobj = (value or "").strip().lower() == "[object object]"
+        if not is_objobj:
+            try:
+                await frame.select_option(selector, value, timeout=10000)
+                return
+            except Exception as e:  # noqa: BLE001
+                log.warning("[%s] select(%s) value=%r n'a pas matché (%s) — "
+                            "fallback match par label", self.sid, selector, value, e)
+        # Fallback (value "[object Object]" ou sans match) : on relit les options
+        # réelles et on choisit par LABEL — utile pour les selects Vue.js dont la
+        # value est un objet stringifié inutilisable. On sélectionne par INDEX DOM
+        # pour ne pas dépendre d'une value cassée. On corrige la forme, pas le fond.
+        wanted = (value or "").strip().lower().replace("[object object]", "").strip()
+        opts = await frame.eval_on_selector(
+            selector,
+            "el => Array.from(el.options).map(o => ({value:o.value, "
+            "label:(o.label||o.textContent||'').trim()}))",
+        )
+        for idx, o in enumerate(opts or []):
+            lab = (o.get("label") or "").strip().lower()
+            if not lab:
+                continue
+            if wanted and (wanted in lab or lab in wanted):
+                await frame.select_option(selector, index=idx, timeout=10000)
+                log.info("[%s] select fallback: label %r -> index %d",
+                         self.sid, o["label"], idx)
+                return
+        raise RuntimeError(
+            f"select: aucune option ne matche value={value!r} "
+            f"(labels: {[o.get('label') for o in (opts or [])]})")
 
     async def scroll(self, pixels: int = 500):
         frame = self._active_frame or self.page

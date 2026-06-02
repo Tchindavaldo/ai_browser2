@@ -45,7 +45,10 @@ SELECT: "value" doit etre une CHAINE (la value brute d'une option), JAMAIS un
 objet. Choisis l'option voulue dans son champ "options" et recopie SEULEMENT son
 "value". Ex: options=[{"value":"ORANGEMONEY","label":"Orange Money"}] ->
 {"type":"select","selector":"select[name='reseau']","value":"ORANGEMONEY"}.
-N'ecris PAS value={"value":"ORANGEMONEY",...} ni value="Orange Money".
+N'ecris PAS value={"value":"ORANGEMONEY",...} ni value="[object Object]".
+EXCEPTION: si la "value" de l'option vaut "[object Object]" (select Vue.js dont
+la value est inexploitable), passe alors le LIBELLE exact dans "value" (ex:
+value="Orange Money") — le systeme matchera l'option par son label.
 
 await_change: mets-le a true quand tu as fini d'agir et que tu dois ATTENDRE
 qu'un evenement exterieur change la page (ex: tu attends que l'utilisateur
