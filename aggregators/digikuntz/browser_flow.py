@@ -213,6 +213,7 @@ class DigikuntzAgent:
             # conclut succès / refus / attente.
             await sb.watch_page_changes()
             decided = False
+            last_judged = None  # dernier texte déjà interprété (évite de re-juger l'identique)
             for i in range(watch_budget):  # plafond = délai opérateur; break dès qu'il se passe qqch
                 await asyncio.sleep(1)
 
@@ -221,6 +222,11 @@ class DigikuntzAgent:
                 watcher_status = await sb.get_page_status()
                 if watcher_status and watcher_status.get("status") in ("changed", "redirected"):
                     changed_text = watcher_status.get("message", "")
+
+                # Ne re-juge PAS un texte déjà interprété (ex. "en cours de
+                # traitement" qui reste affiché): on attend un VRAI nouveau texte.
+                if changed_text is not None and changed_text == last_judged:
+                    changed_text = None
 
                 # (b) Redirection hors du checkout = page de résultat -> l'IA lit.
                 if changed_text is None:
@@ -240,22 +246,34 @@ class DigikuntzAgent:
                     # (ussd_sent=True: un échec ici = refus utilisateur / solde,
                     # pas un problème réseau). Le code ne décide pas.
                     status, msg = await self._interpret(changed_text, req.network, ussd_sent=True)
-                    result.final_status = status
-                    result.final_message = msg
-                    decided = True
-                    break
+                    # 'pending' n'est PAS une conclusion: un message du type
+                    # "paiement en cours de traitement" veut dire ATTENDS encore,
+                    # pas "c'est fini". On NE break PAS — on continue d'observer
+                    # jusqu'au vrai verdict (successful/failed/cancelled) ou au
+                    # budget 17min. Sinon on figerait un 'pending' qui bloque tout.
+                    if status in ("successful", "failed", "cancelled"):
+                        result.final_status = status
+                        result.final_message = msg
+                        decided = True
+                        break
+                    # statut non définitif (pending / inconnu) -> on garde la main
+                    # au watcher (le setInterval JS re-signalera le prochain
+                    # changement) et on continue d'attendre.
+                    log.info("Statut '%s' non définitif — on continue d'attendre", status)
 
             if not decided:
-                # Budget écoulé (17 min) sans validation : même verdict que le
-                # replay — l'opérateur a auto-annulé la transaction non validée
-                # dans le délai. 'cancelled' (et non 'timeout') pour cohérence
-                # de statut entre les deux moteurs.
-                result.final_status = "cancelled"
+                # Budget écoulé (17 min) sans validation. C'est un FAIT opérateur
+                # UNIVERSEL (le délai Mobile Money est mécaniquement dépassé, la
+                # transaction ne peut plus aboutir) — pas une interprétation, donc
+                # pas besoin de l'IA ici. Statut 'expired' (PAS 'cancelled'): le
+                # délai est entièrement passé, le numéro doit être relançable
+                # IMMÉDIATEMENT (la garde anti-doublon exclut 'expired').
+                result.final_status = "expired"
                 result.final_message = (
-                    "Transaction annulée par l'opérateur "
-                    "(USSD non validé dans le délai imparti)."
+                    "Délai de validation dépassé (17 min). La demande de paiement "
+                    "a expiré côté opérateur. Vous pouvez relancer un paiement."
                 )
-                log.info("USSD validation timeout (%ds) -> cancelled", settings.retry_window_s)
+                log.info("USSD validation timeout (%ds) -> expired", settings.retry_window_s)
         else:
             # No USSD. Classify the authoritative texts in priority order:
             #   1. the message the agent read on the page after Pay
