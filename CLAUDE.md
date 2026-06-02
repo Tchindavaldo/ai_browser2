@@ -3,6 +3,16 @@
 Ce fichier est **versionné** : ses règles s'appliquent automatiquement sur tout
 PC où le projet est cloné/pull, dans n'importe quelle session Claude Code.
 
+## À lire en DÉBUT de session (OBLIGATOIRE)
+
+Lis **`ARCHITECTURE.md`** (à la racine) avant de travailler : il donne une vision
+360 du projet (carte des fichiers, rôle de chaque module, flux d'un paiement,
+statuts, concurrence). Ça évite de devoir parcourir tout l'arbre pour comprendre.
+
+**Tenir à jour :** dès qu'un travail modifie la structure (nouveau fichier,
+module, endpoint, table, flux) ou rend une description obsolète, **mets à jour
+`ARCHITECTURE.md` ET `README.md`** avant de clore — au même titre que le code.
+
 ## Convention de branches (OBLIGATOIRE)
 
 Toujours préfixer les branches selon leur nature :
