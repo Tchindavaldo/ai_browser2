@@ -154,196 +154,6 @@
         }
       }
     },
-    "/transactions": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Historique des transactions",
-        "description": "Dernières transactions auditées (vide si Supabase non configuré).\n\nFiltre optionnel par `aggregator`.",
-        "operationId": "list_transactions_transactions_get",
-        "parameters": [
-          {
-            "name": "aggregator",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Aggregator"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 50,
-              "title": "Limit"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/status/{transaction_ref}": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Statut d'une transaction",
-        "description": "Récupère une transaction stockée par sa référence.",
-        "operationId": "transaction_status_status__transaction_ref__get",
-        "parameters": [
-          {
-            "name": "transaction_ref",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Transaction Ref"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Aucune transaction pour cette référence."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/transactions/{transaction_ref}/trace": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Trace IA d'une transaction (mode browser)",
-        "description": "Renvoie la trace tour-par-tour de l'agent IA pour une transaction browser.\n\nChaque entrée : ce que l'IA a vu (url, nb d'éléments), sa pensée, les actions\njouées, et si l'objectif a été atteint. Vide pour un paiement en mode replay.",
-        "operationId": "transaction_trace_transactions__transaction_ref__trace_get",
-        "parameters": [
-          {
-            "name": "transaction_ref",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Transaction Ref"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Aucune transaction pour cette référence."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/transactions/{transaction_ref}/errors": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Erreurs détaillées d'une transaction (browser/replay)",
-        "description": "Renvoie les erreurs détaillées d'une transaction.\n\nChaque entrée précise le moteur (`engine`: browser/replay) et la SOURCE\n(`source`: ai / browser / transaction / replay) pour savoir exactement où ça\na cassé, plus la catégorie, le message clair et les détails. Vide si la\ntransaction a réussi.",
-        "operationId": "transaction_errors_transactions__transaction_ref__errors_get",
-        "parameters": [
-          {
-            "name": "transaction_ref",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Transaction Ref"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Aucune transaction pour cette référence."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/transactions/{tx_id}/cancel": {
       "post": {
         "tags": [
@@ -390,197 +200,10 @@
           }
         }
       }
-    },
-    "/aggregators/{name}/template": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Template curl actif d'un agrégateur",
-        "description": "Renvoie le template de replay actif de l'agrégateur (404 si aucun).",
-        "operationId": "get_template_aggregators__name__template_get",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Agrégateur inconnu ou aucun template actif."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Ajouter/mettre à jour manuellement le template curl",
-        "description": "Ajoute manuellement un template de replay pour l'agrégateur.\n\nPar défaut **append-si-différent** (comme le mode browser) : si identique à\nl'actif, rien n'est ajouté. `force=true` crée toujours une nouvelle version.",
-        "operationId": "set_template_aggregators__name__template_post",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Name"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TemplateBody"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Agrégateur inconnu."
-          },
-          "503": {
-            "description": "Supabase non configuré (persistance désactivée)."
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/drive": {
-      "post": {
-        "tags": [
-          "dev"
-        ],
-        "summary": "Pilotage libre du navigateur (dev)",
-        "description": "Drive the browser to a URL and let the AI agent handle it.",
-        "operationId": "drive_drive_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DriveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/test-llm": {
-      "post": {
-        "tags": [
-          "dev"
-        ],
-        "summary": "Ping du LLM (dev)",
-        "description": "Quick test: send a simple prompt to DeepSeek and return the response.",
-        "operationId": "test_llm_test_llm_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
     }
   },
   "components": {
     "schemas": {
-      "DriveRequest": {
-        "properties": {
-          "url": {
-            "type": "string",
-            "title": "Url"
-          },
-          "objective": {
-            "type": "string",
-            "title": "Objective"
-          },
-          "phone": {
-            "type": "string",
-            "title": "Phone",
-            "default": ""
-          },
-          "network": {
-            "type": "string",
-            "title": "Network",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "url",
-          "objective"
-        ],
-        "title": "DriveRequest"
-      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -708,16 +331,16 @@
             "title": "Success",
             "description": "Vrai si le paiement a abouti."
           },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "successful | ussd_sent | failed | cancelled | pending.",
+            "default": ""
+          },
           "message": {
             "type": "string",
             "title": "Message",
-            "description": "Message clair pour l'utilisateur (succès comme échec).",
-            "default": ""
-          },
-          "error": {
-            "type": "string",
-            "title": "Error",
-            "description": "Message d'erreur technique éventuel.",
+            "description": "Message clair pour l'utilisateur final.",
             "default": ""
           },
           "transaction_id": {
@@ -726,169 +349,19 @@
             "description": "Référence transaction de l'agrégateur.",
             "default": ""
           },
-          "payment_status": {
+          "code": {
             "type": "string",
-            "title": "Payment Status",
+            "title": "Code",
+            "description": "Code machine en cas d'erreur (ex. network_unavailable, operator_unavailable). Vide si OK.",
             "default": ""
-          },
-          "turns": {
-            "type": "integer",
-            "title": "Turns",
-            "description": "Nombre de tours de l'agent IA (mode browser).",
-            "default": 0
-          },
-          "input_tokens": {
-            "type": "integer",
-            "title": "Input Tokens",
-            "default": 0
-          },
-          "output_tokens": {
-            "type": "integer",
-            "title": "Output Tokens",
-            "default": 0
-          },
-          "flutterwave_charge_url": {
-            "type": "string",
-            "title": "Flutterwave Charge Url",
-            "default": ""
-          },
-          "flutterwave_charge_body": {
-            "type": "string",
-            "title": "Flutterwave Charge Body",
-            "default": ""
-          },
-          "flutterwave_charge_response": {
-            "type": "string",
-            "title": "Flutterwave Charge Response",
-            "default": ""
-          },
-          "curl_replay": {
-            "type": "string",
-            "title": "Curl Replay",
-            "description": "Commande curl reproductible déduite.",
-            "default": ""
-          },
-          "plaintext_payload": {
-            "type": "string",
-            "title": "Plaintext Payload",
-            "default": ""
-          },
-          "public_key": {
-            "type": "string",
-            "title": "Public Key",
-            "default": ""
-          },
-          "verify_url": {
-            "type": "string",
-            "title": "Verify Url",
-            "default": ""
-          },
-          "verify_request_body": {
-            "type": "string",
-            "title": "Verify Request Body",
-            "default": ""
-          },
-          "verify_last_response": {
-            "type": "string",
-            "title": "Verify Last Response",
-            "default": ""
-          },
-          "verify_curl": {
-            "type": "string",
-            "title": "Verify Curl",
-            "default": ""
-          },
-          "final_status": {
-            "type": "string",
-            "title": "Final Status",
-            "description": "successful | failed | cancelled | pending | unknown.",
-            "default": ""
-          },
-          "final_message": {
-            "type": "string",
-            "title": "Final Message",
-            "description": "Message clair pour l'utilisateur final.",
-            "default": ""
-          },
-          "error_signals": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Error Signals",
-            "default": {}
-          },
-          "captured_requests": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Captured Requests",
-            "default": []
           }
         },
         "type": "object",
         "required": [
           "success"
         ],
-        "title": "PayResponse"
-      },
-      "TemplateBody": {
-        "properties": {
-          "charge_url": {
-            "type": "string",
-            "title": "Charge Url",
-            "default": ""
-          },
-          "verify_url": {
-            "type": "string",
-            "title": "Verify Url",
-            "default": ""
-          },
-          "init_url": {
-            "type": "string",
-            "title": "Init Url",
-            "default": ""
-          },
-          "upgrade_url": {
-            "type": "string",
-            "title": "Upgrade Url",
-            "default": ""
-          },
-          "hosted_pay_url": {
-            "type": "string",
-            "title": "Hosted Pay Url",
-            "default": ""
-          },
-          "headers": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Headers"
-          },
-          "payload_skeleton": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Payload Skeleton"
-          },
-          "public_key_rsa": {
-            "type": "string",
-            "title": "Public Key Rsa",
-            "default": ""
-          },
-          "flw_pub_key": {
-            "type": "string",
-            "title": "Flw Pub Key",
-            "default": ""
-          },
-          "force": {
-            "type": "boolean",
-            "title": "Force",
-            "description": "Forcer une nouvelle version même si identique à l'actif.",
-            "default": false
-          }
-        },
-        "type": "object",
-        "title": "TemplateBody",
-        "description": "Champs du curl template (tous optionnels — seuls ceux fournis sont posés)."
+        "title": "PayResponse",
+        "description": "Vue CLIENT (dev qui intègre l'API) — strictement l'essentiel métier.\n\nTout le détail technique (charge_url, plaintext, curl, trace, tokens…) est\nréservé à l'admin (voir PayResponseDebug + ?debug=true). Ne JAMAIS ajouter de\nchamp interne ici."
       },
       "ValidationError": {
         "properties": {
@@ -943,7 +416,11 @@
     },
     {
       "name": "transactions",
-      "description": "Historique et statut des transactions (Supabase)."
+      "description": "Gestion des transactions exposée au client."
+    },
+    {
+      "name": "admin",
+      "description": "Audit/debug réservé à l'admin backend (non documenté pour le client)."
     },
     {
       "name": "dev",

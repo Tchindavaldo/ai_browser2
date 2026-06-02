@@ -12,7 +12,8 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
@@ -125,7 +126,8 @@ Toute tentative est auditée (table `transactions`) quand Supabase est configur�
 OPENAPI_TAGS = [
     {"name": "system", "description": "Santé et introspection du service."},
     {"name": "payments", "description": "Exécution des paiements via les agrégateurs."},
-    {"name": "transactions", "description": "Historique et statut des transactions (Supabase)."},
+    {"name": "transactions", "description": "Gestion des transactions exposée au client."},
+    {"name": "admin", "description": "Audit/debug réservé à l'admin backend (non documenté pour le client)."},
     {"name": "dev", "description": "Outils de développement (pilotage libre, ping LLM)."},
 ]
 
@@ -166,10 +168,27 @@ class PayRequest(BaseModel):
 
 
 class PayResponse(BaseModel):
+    """Vue CLIENT (dev qui intègre l'API) — strictement l'essentiel métier.
+
+    Tout le détail technique (charge_url, plaintext, curl, trace, tokens…) est
+    réservé à l'admin (voir PayResponseDebug + ?debug=true). Ne JAMAIS ajouter de
+    champ interne ici.
+    """
     success: bool = Field(..., description="Vrai si le paiement a abouti.")
-    message: str = Field("", description="Message clair pour l'utilisateur (succès comme échec).")
-    error: str = Field("", description="Message d'erreur technique éventuel.")
+    status: str = Field("", description="successful | ussd_sent | failed | cancelled | pending.")
+    message: str = Field("", description="Message clair pour l'utilisateur final.")
     transaction_id: str = Field("", description="Référence transaction de l'agrégateur.")
+    code: str = Field("", description="Code machine en cas d'erreur (ex. network_unavailable, operator_unavailable). Vide si OK.")
+
+
+class PayResponseDebug(PayResponse):
+    """Vue ADMIN/DEBUG — la vue client + tout le détail technique.
+
+    Renvoyée uniquement quand l'admin passe ?debug=true (paramètre non documenté
+    dans Swagger). À terme: endpoint admin dédié protégé (cf.
+    todo/migrer-vue-admin-endpoint-dedie.md).
+    """
+    error: str = Field("", description="Message d'erreur technique éventuel.")
     payment_status: str = ""
     turns: int = Field(0, description="Nombre de tours de l'agent IA (mode browser).")
     input_tokens: int = 0
@@ -184,8 +203,8 @@ class PayResponse(BaseModel):
     verify_request_body: str = ""
     verify_last_response: str = ""
     verify_curl: str = ""
-    final_status: str = Field("", description="successful | failed | cancelled | pending | unknown.")
-    final_message: str = Field("", description="Message clair pour l'utilisateur final.")
+    final_status: str = ""
+    final_message: str = ""
     error_signals: dict = {}
     captured_requests: list[dict] = []
 
@@ -246,7 +265,10 @@ async def set_max_tabs(req: MaxTabsRequest):
                              "(code=network_unavailable). Réessayer plus tard."},
     },
 )
-async def pay(req: PayRequest):
+async def pay(
+    req: PayRequest,
+    debug: bool = Query(False, include_in_schema=False),
+):
     """Exécute un paiement via l'agrégateur et le mode demandés.
 
     - **auto** (défaut) : replay d'abord ; bascule navigateur si non concluant
@@ -440,11 +462,24 @@ async def pay(req: PayRequest):
             {"code": result.error_code, "message": UPSTREAM_MESSAGES[result.error_code]},
         )
 
-    return PayResponse(
+    # Vue CLIENT (par défaut) : l'essentiel métier uniquement.
+    client_status = result.final_status or result.payment_status or ""
+    client = PayResponse(
         success=result.success,
+        status=client_status,
         message=result.final_message or result.error,
-        error=result.error,
         transaction_id=result.transaction_id,
+        code=result.error_code or "",
+    )
+    if not debug:
+        return client
+
+    # Vue ADMIN/DEBUG (?debug=true) : la vue client + tout le détail technique.
+    # JSONResponse explicite pour contourner le filtrage response_model=PayResponse
+    # (qui sinon retirerait les champs debug). Param debug non documenté (Swagger).
+    full = PayResponseDebug(
+        **client.model_dump(),
+        error=result.error,
         payment_status=result.payment_status,
         turns=result.turns,
         input_tokens=result.input_tokens,
@@ -464,9 +499,11 @@ async def pay(req: PayRequest):
         error_signals=result.error_signals,
         captured_requests=result.captured_requests,
     )
+    return JSONResponse(content=full.model_dump())
 
 
-@app.get("/transactions", tags=["transactions"], summary="Historique des transactions")
+@app.get("/transactions", tags=["admin"], summary="Historique des transactions (admin)",
+         include_in_schema=False)
 async def list_transactions(aggregator: str | None = None, limit: int = 50):
     """Dernières transactions auditées (vide si Supabase non configuré).
 
@@ -477,8 +514,9 @@ async def list_transactions(aggregator: str | None = None, limit: int = 50):
 
 @app.get(
     "/status/{transaction_ref}",
-    tags=["transactions"],
-    summary="Statut d'une transaction",
+    tags=["admin"],
+    summary="Statut d'une transaction (admin)",
+    include_in_schema=False,
     responses={404: {"description": "Aucune transaction pour cette référence."}},
 )
 async def transaction_status(transaction_ref: str):
@@ -491,8 +529,9 @@ async def transaction_status(transaction_ref: str):
 
 @app.get(
     "/transactions/{transaction_ref}/trace",
-    tags=["transactions"],
-    summary="Trace IA d'une transaction (mode browser)",
+    tags=["admin"],
+    summary="Trace IA d'une transaction (admin, mode browser)",
+    include_in_schema=False,
     responses={404: {"description": "Aucune transaction pour cette référence."}},
 )
 async def transaction_trace(transaction_ref: str):
@@ -510,8 +549,9 @@ async def transaction_trace(transaction_ref: str):
 
 @app.get(
     "/transactions/{transaction_ref}/errors",
-    tags=["transactions"],
-    summary="Erreurs détaillées d'une transaction (browser/replay)",
+    tags=["admin"],
+    summary="Erreurs détaillées d'une transaction (admin, browser/replay)",
+    include_in_schema=False,
     responses={404: {"description": "Aucune transaction pour cette référence."}},
 )
 async def transaction_errors(transaction_ref: str):
@@ -570,8 +610,9 @@ class TemplateBody(BaseModel):
 
 @app.get(
     "/aggregators/{name}/template",
-    tags=["transactions"],
-    summary="Template curl actif d'un agrégateur",
+    tags=["admin"],
+    summary="Template curl actif d'un agrégateur (admin)",
+    include_in_schema=False,
     responses={404: {"description": "Agrégateur inconnu ou aucun template actif."}},
 )
 async def get_template(name: str):
@@ -586,8 +627,9 @@ async def get_template(name: str):
 
 @app.post(
     "/aggregators/{name}/template",
-    tags=["transactions"],
-    summary="Ajouter/mettre à jour manuellement le template curl",
+    tags=["admin"],
+    summary="Ajouter/mettre à jour manuellement le template curl (admin)",
+    include_in_schema=False,
     responses={
         404: {"description": "Agrégateur inconnu."},
         503: {"description": "Supabase non configuré (persistance désactivée)."},
@@ -616,7 +658,8 @@ class DriveRequest(BaseModel):
     network: str = ""
 
 
-@app.post("/drive", tags=["dev"], summary="Pilotage libre du navigateur (dev)")
+@app.post("/drive", tags=["dev"], summary="Pilotage libre du navigateur (dev)",
+          include_in_schema=False)
 async def drive(req: DriveRequest):
     """Drive the browser to a URL and let the AI agent handle it."""
     if not browser or not llm:
@@ -657,7 +700,8 @@ async def drive(req: DriveRequest):
         await browser.release_session(session)
 
 
-@app.post("/test-llm", tags=["dev"], summary="Ping du LLM (dev)")
+@app.post("/test-llm", tags=["dev"], summary="Ping du LLM (dev)",
+          include_in_schema=False)
 async def test_llm():
     """Quick test: send a simple prompt to DeepSeek and return the response."""
     if not llm:
