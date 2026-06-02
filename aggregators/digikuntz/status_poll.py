@@ -137,92 +137,97 @@ def extract_verify_params(captured) -> dict | None:
 
 
 async def poll_verify_flutterwave(
-    verify_params: dict, network: str, timeout_s: int | None = None
+    verify_params: dict, network: str, timeout_s: int | None = None,
+    provider_id: str | None = None,
 ) -> dict:
-    """Poll verify/mpesa Flutterwave (MÊME mécanisme que le replay step4) après
-    fermeture du navigateur. Source immédiate et fiable (vs statut DigiKUNTZ qui
-    traîne). Retourne {status, message}. 17min sans terminal -> expired.
+    """Polling verify/mpesa Flutterwave PROPRE AU NAVIGATEUR.
+
+    Boucle indépendante de celle du replay (step4_poll_verify) — volontairement
+    dupliquée pour que toute évolution côté navigateur (ex. coordination webhook
+    via le registre) NE TOUCHE PAS le replay, et inversement. Même comportement
+    de fond (poll verify, interpret_verify), mais autonome.
+
+    Si `provider_id` est fourni, on écoute AUSSI le registre : si le webhook
+    DigiKUNTZ livre un verdict terminal pendant qu'on poll, on s'arrête net
+    (option 2). Le premier des deux (poll verify OU webhook) qui a un terminal
+    gagne. 17min sans terminal -> expired.
     """
-    # Réutilise la logique éprouvée du replay : step4_poll_verify + interpret_verify.
-    from . import replay_flow
+    from . import replay_flow  # pour interpret_verify + ReplayConfig (lecture seule)
     if timeout_s is None:
         timeout_s = settings.retry_window_s
     cfg = replay_flow.ReplayConfig.defaults()
     if verify_params.get("pub_key"):
         cfg.pub_key = verify_params["pub_key"]
-    log.info("poll_verify_flutterwave: flw_ref=%s (max %ds)",
-             verify_params["flw_ref"], timeout_s)
-    verify = await replay_flow.step4_poll_verify(
-        verify_params["modalauditid"], verify_params["flw_ref"],
-        timeout_s=timeout_s, cfg=cfg,
-    )
-    verdict = replay_flow.interpret_verify(verify, network)
-    if verdict:
-        return {"status": verdict[0], "message": verdict[1]}
-    if verify.get("status") == "timeout":
-        # 17min sans verdict terminal = délai opérateur dépassé.
+    modalauditid = verify_params["modalauditid"]
+    flw_ref = verify_params["flw_ref"]
+
+    ev = registry.register(provider_id) if provider_id else None
+    log.info("poll_verify_flutterwave (nav): flw_ref=%s (max %ds, webhook=%s)",
+             flw_ref, timeout_s, bool(provider_id))
+
+    start = time.monotonic()
+    deadline = start + timeout_s
+    i = 0
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            while time.monotonic() < deadline:
+                # (a) le webhook a-t-il déjà livré le verdict ? -> on s'arrête net
+                if ev is not None and ev.is_set():
+                    v = registry.take_verdict(provider_id)
+                    if v and v.get("status") in _TERMINAL:
+                        log.info("poll_verify_flutterwave: verdict WEBHOOK %s", v["status"])
+                        return {"status": v["status"],
+                                "message": self_friendly_msg(v["status"], network)}
+                i += 1
+                try:
+                    resp = await client.post(
+                        cfg.verify_url,
+                        json={"modalauditid": modalauditid,
+                              "PBFPubKey": cfg.pub_key, "flw_ref": flw_ref},
+                        headers=cfg.headers,
+                    )
+                    data = resp.json()
+                except (httpx.HTTPError, ValueError):
+                    await asyncio.sleep(2)
+                    continue
+
+                status = data.get("data", {}).get("status", "pending")
+                code = data.get("data", {}).get("chargeResponseCode", "")
+                elapsed = int(time.monotonic() - start)
+                log.info("verify (nav) poll %d (t+%ds): status=%s code=%s",
+                         i, elapsed, status, code)
+
+                verdict = replay_flow.interpret_verify(data, network)
+                if verdict and verdict[0] in _TERMINAL:
+                    # On a le verdict en premier : on le dépose pour un webhook
+                    # tardif (idempotence) et on conclut.
+                    if provider_id:
+                        registry.deliver(provider_id,
+                                         {"status": verdict[0], "raw": status, "data": data})
+                    return {"status": verdict[0], "message": verdict[1]}
+
+                # Attente du prochain tick, interrompue tôt si le webhook livre.
+                if ev is not None:
+                    try:
+                        await asyncio.wait_for(ev.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(2)
+
+        # 17min écoulées sans terminal = délai opérateur dépassé.
         return {"status": "expired",
                 "message": ("Délai de validation dépassé (17 min). La demande a "
                             "expiré côté opérateur. Vous pouvez relancer un paiement.")}
-    st = verify.get("data", {}).get("status", "unknown")
-    return {"status": st, "message": f"Statut: {st}"}
-
-
-async def poll_until_terminal(
-    transaction_id: str, timeout_s: int | None = None, interval_s: float = 5.0
-) -> dict:
-    """Poll le statut jusqu'à un verdict terminal ou l'expiration du délai.
-
-    - terminal (successful/failed/cancelled) -> on renvoie {status, raw, data}.
-    - 17 min écoulées sans terminal (toujours pending) -> FAIT opérateur
-      universel: le délai est dépassé, on renvoie 'expired'. (Comme convenu, un
-      pending qui dure 17 min = annulé par l'opérateur.)
-    Le délai par défaut = settings.retry_window_s (1020s).
-    """
-    if timeout_s is None:
-        timeout_s = settings.retry_window_s
-    deadline = time.monotonic() + timeout_s
-    last = None
-    i = 0
-    # Ouvre la boîte du registre : si le WEBHOOK reçoit le terminal avant nous,
-    # il le dépose ici et on s'arrête immédiatement (pas d'attente du prochain tick).
-    ev = registry.register(transaction_id)
-    log.info("status_poll: début polling %s (max %ds, intervalle %ss)",
-             transaction_id, timeout_s, interval_s)
-    try:
-        while time.monotonic() < deadline:
-            # Le webhook a-t-il déjà livré un verdict terminal ?
-            if ev.is_set():
-                v = registry.take_verdict(transaction_id)
-                if v:
-                    log.info("status_poll: %s — verdict reçu par WEBHOOK: %s",
-                             transaction_id, v.get("status"))
-                    return v
-            i += 1
-            res = await fetch_status(transaction_id)
-            if res is not None:
-                last = res
-                log.info("status_poll %s (#%d): %s (raw=%s)",
-                         transaction_id, i, res["internal"], res["raw"])
-                if res["internal"] in _TERMINAL:
-                    verdict = {"status": res["internal"], "raw": res["raw"], "data": res["data"]}
-                    # On a détecté en PREMIER : on dépose pour réveiller un
-                    # éventuel doublon, mais surtout on conclut.
-                    registry.deliver(transaction_id, verdict)
-                    return verdict
-            # Attente interrompue tôt si le webhook livre pendant le sleep.
-            try:
-                await asyncio.wait_for(ev.wait(), timeout=interval_s)
-            except asyncio.TimeoutError:
-                pass
-
-        # Délai dépassé sans terminal. pending 17min -> expired (annulé opérateur).
-        log.info("status_poll: %s — délai %ds écoulé sans verdict terminal -> expired",
-                 transaction_id, timeout_s)
-        return {
-            "status": "expired",
-            "raw": (last or {}).get("raw", ""),
-            "data": (last or {}).get("data"),
-        }
     finally:
-        registry.close(transaction_id)
+        if provider_id:
+            registry.close(provider_id)
+
+
+def self_friendly_msg(status: str, network: str) -> str:
+    """Message FR court selon le statut terminal (verdict reçu par webhook)."""
+    if status == "successful":
+        return "Paiement validé avec succès."
+    if status == "cancelled":
+        return "Paiement annulé / refusé sur le USSD."
+    return "Paiement échoué (refus ou solde insuffisant)."

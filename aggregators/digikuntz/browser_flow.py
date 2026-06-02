@@ -198,7 +198,8 @@ class DigikuntzAgent:
             if vp:
                 log.info("USSD demandé — polling verify Flutterwave (flw_ref=%s)",
                          vp["flw_ref"])
-                poll = await status_poll.poll_verify_flutterwave(vp, req.network)
+                poll = await status_poll.poll_verify_flutterwave(
+                    vp, req.network, provider_id=result.provider_transaction_id or None)
                 result.final_status = poll["status"]
                 result.final_message = poll["message"]
                 result.payment_status = result.final_status
