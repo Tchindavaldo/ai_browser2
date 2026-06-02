@@ -29,13 +29,20 @@ Schema exact:
     }, ...
   ],
   "objective_reached": bool,
-  "objective_result": string (resume final si reached=true)
+  "objective_result": string (resume final si reached=true),
+  "await_change": bool (optionnel)
 }
 
 Regles: utilise des selecteurs CSS courts et stables (prefere [data-id],
 [name], #id a .class generique). N'inclus jamais d'action si tu n'es pas
 sur de l'element. Si l'objectif est atteint, mets objective_reached=true
-et un actions:[] vide."""
+et un actions:[] vide.
+
+await_change: mets-le a true quand tu as fini d'agir et que tu dois ATTENDRE
+qu'un evenement exterieur change la page (ex: tu attends que l'utilisateur
+valide le USSD sur son telephone). Le systeme attendra alors qu'un changement
+reel de page survienne avant de te redonner la main — inutile de faire des
+'wait' repetes. Tu peux mettre await_change=true avec actions:[] vide."""
 
 
 @dataclass
@@ -44,6 +51,7 @@ class AgentDecision:
     actions: list[dict] = field(default_factory=list)
     objective_reached: bool = False
     objective_result: str = ""
+    await_change: bool = False  # l'IA attend un changement de page avant de re-juger
     raw_json: str = ""
 
     @classmethod
@@ -63,6 +71,7 @@ class AgentDecision:
             d.actions = obj.get("actions", [])
             d.objective_reached = obj.get("objective_reached", False)
             d.objective_result = obj.get("objective_result", "")
+            d.await_change = obj.get("await_change", False)
         except (json.JSONDecodeError, ValueError) as e:
             log.error("Failed to parse LLM response: %s\nText: %s", e, text[:500])
             d.thought = f"PARSE ERROR: {e}"
@@ -177,7 +186,7 @@ class ReasoningLoop:
                 result.result = decision.objective_result
                 break
 
-            if not decision.actions:
+            if not decision.actions and not decision.await_change:
                 log.warning("│ ⚠️  aucune action proposée, tour ignoré")
                 log.info("└────────────────────────────────────────")
                 continue
@@ -196,6 +205,26 @@ class ReasoningLoop:
                             self.max_elapsed_s)
                 result.error = "deadline exceeded"
                 break
+
+            # ATTENTE PASSIVE entre deux regards de l'IA : si l'IA a demandé
+            # await_change (ex. USSD envoyé, elle attend la validation), le code
+            # OBSERVE jusqu'au prochain changement de page (fait mécanique, sans
+            # juger) au lieu de la rappeler en boucle. Elle reprend la main et
+            # décide au tour suivant. Économise les tokens; l'IA reste seule juge.
+            if decision.await_change:
+                remaining = None
+                if self.max_elapsed_s is not None:
+                    remaining = self.max_elapsed_s - (_time.time() - self._started_at)
+                    if remaining <= 0:
+                        # Délai global dépassé: l'IA le verra (deadline_exceeded)
+                        # au prochain tour et conclura. On reboucle sans attendre.
+                        continue
+                budget = min(remaining, 1020) if remaining is not None else 1020
+                baseline = (snap.outer_html or "")[:500]
+                log.info("│ ⏳ attente passive d'un changement de page (max %ds)…", int(budget))
+                changed = await self.browser.wait_for_page_change(budget, baseline=baseline)
+                if changed is None:
+                    log.info("│ ⏳ aucun changement dans le budget — l'IA réévaluera")
 
         else:
             result.error = "max turns reached"

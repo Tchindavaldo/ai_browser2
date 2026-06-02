@@ -261,6 +261,36 @@ class BrowserSession:
         except Exception:
             return None
 
+    async def wait_for_page_change(self, timeout_s: float, baseline: str | None = None):
+        """OBSERVATION PURE: bloque jusqu'à ce que la page change, sans rien juger.
+
+        Installe le watcher (idempotent), puis poll son drapeau jusqu'à détecter
+        un texte différent de `baseline` (l'état déjà vu par l'IA) OU une
+        redirection d'URL, OU l'expiration de `timeout_s`. Ne décide RIEN: retourne
+        juste le nouveau texte observé (str) ou None si rien n'a changé dans le
+        budget. C'est à l'IA d'interpréter ce texte au tour suivant.
+        """
+        import asyncio
+        await self.watch_page_changes()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            await asyncio.sleep(1)
+            st = await self.get_page_status()
+            if st and st.get("status") in ("changed", "redirected"):
+                txt = st.get("message", "")
+                if txt and txt != baseline:
+                    return txt
+            # Redirection hors checkout = page de résultat (fait observable).
+            try:
+                url = self.page.url
+                if ("flutterwave.com" not in url
+                        and "checkout-v3-ui-prod" not in url
+                        and "ravepay" not in url):
+                    return f"redirected to {url}"
+            except Exception:
+                pass
+        return None
+
     async def hook_crypto(self):
         """Monkey-patch cryptico.encrypt to capture plaintext before encryption.
         Must be called AFTER the iframe content has loaded cryptico.js."""
