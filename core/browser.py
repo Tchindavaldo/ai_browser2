@@ -279,6 +279,8 @@ class BrowserSession:
             if st and st.get("status") in ("changed", "redirected"):
                 txt = st.get("message", "")
                 if txt and txt != baseline:
+                    log.info("[%s] 👁 polling — page changée, texte vu:\n%s",
+                             self.sid, txt[:1000])
                     return txt
             # Redirection hors checkout = page de résultat (fait observable).
             try:
@@ -286,6 +288,7 @@ class BrowserSession:
                 if ("flutterwave.com" not in url
                         and "checkout-v3-ui-prod" not in url
                         and "ravepay" not in url):
+                    log.info("[%s] 👁 polling — redirection hors checkout: %s", self.sid, url)
                     return f"redirected to {url}"
             except Exception:
                 pass
