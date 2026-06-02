@@ -582,7 +582,7 @@ class BrowserSession:
             for (const el of els) {
                 const rect = el.getBoundingClientRect();
                 if (rect.width === 0 && rect.height === 0) continue;
-                results.push({
+                const entry = {
                     tag: el.tagName.toLowerCase(),
                     id: el.id || '',
                     name: el.getAttribute('name') || '',
@@ -595,7 +595,18 @@ class BrowserSession:
                     visible: rect.width > 0 && rect.height > 0,
                     rect: { x: Math.round(rect.x), y: Math.round(rect.y),
                             w: Math.round(rect.width), h: Math.round(rect.height) }
-                });
+                };
+                // Pour un <select>, expose les options (value + libellé) afin que
+                // l'IA sache QUELLE valeur passer à l'action select au lieu de la
+                // deviner. Sans ça, elle peut envoyer un libellé ou un objet faux.
+                if (el.tagName.toLowerCase() === 'select') {
+                    entry.options = Array.from(el.options).map(o => ({
+                        value: o.value,
+                        label: (o.label || o.textContent || '').trim().slice(0, 80),
+                        selected: o.selected,
+                    }));
+                }
+                results.push(entry);
             }
             return results;
         })()
