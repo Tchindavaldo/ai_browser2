@@ -38,6 +38,13 @@ par DigiKUNTZ. En local (dev), ce n'est pas le cas -> on s'appuie sur le polling
       renvoie 404).
 - [ ] Coordination polling ⇄ webhook : le premier qui obtient un statut terminal
       gagne ; l'autre est idempotent (comme paymentEventRegistry chez MoobilPay).
+- [ ] **FIX timestamps anti-doublon** : `db.update_status_by_provider_id` (chemin
+      webhook) ne pose PAS `cancelled_at` / `validated_at`, contrairement à
+      `update_transaction` (chemin polling). Si le webhook gagne la course, la
+      garde anti-doublon retombe sur le fallback `created_at` (fenêtre démarrée
+      trop tôt). À corriger : poser `cancelled_at=now()` quand status=cancelled et
+      `validated_at=now()` quand status=successful dans le patch du webhook.
+      (`ussd_sent_at` n'est pas connu du webhook — vient du /charge côté moteur.)
 - [ ] Régénérer le swagger.
 
 ## Note
