@@ -62,6 +62,9 @@ class PaymentResult:
     # Instant (epoch) où le client a VALIDÉ l'USSD (verify -> successful). Base du
     # blocage anti-doublon après un paiement réussi. None si pas (encore) validé.
     validated_at: float | None = None
+    # Qui a posé le verdict terminal : 'polling' (boucle verify) ou 'webhook'
+    # (callback DigiKUNTZ). None pour les verdicts hors course (échec avant USSD).
+    settled_by: str | None = None
     # Polling à exécuter APRÈS la fermeture du navigateur (sans tab). Posé par
     # decide_browser_outcome quand l'USSD est demandé : le navigateur a fini, on
     # ferme sa tab, puis le runner appelle finalize_after_close() qui poll/webhook

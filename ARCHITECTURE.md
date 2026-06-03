@@ -78,7 +78,8 @@ ai_browser2/
 │       ├── 004_provider_transaction_id.sql  Id provider (webhook/polling).
 │       ├── 005_cancelled_at.sql        Horodate le passage à 'cancelled' (audit).
 │       ├── 006_ussd_sent_at.sql        Horodate l'envoi USSD (anti-doublon cancelled).
-│       └── 007_validated_at.sql        Horodate la validation USSD (anti-doublon après succès).
+│       ├── 007_validated_at.sql        Horodate la validation USSD (anti-doublon après succès).
+│       └── 008_settled_by.sql          Qui a settlé le verdict : 'polling' | 'webhook'.
 │
 ├── docs/openapi.json             Swagger versionné (régénérer via scripts/dump_openapi.py).
 ├── scripts/dump_openapi.py       Dump du schéma OpenAPI.

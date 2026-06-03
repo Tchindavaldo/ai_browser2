@@ -177,7 +177,8 @@ async def poll_verify_flutterwave(
                     if v and v.get("status") in _TERMINAL:
                         log.info("poll_verify_flutterwave: verdict WEBHOOK %s", v["status"])
                         return {"status": v["status"],
-                                "message": self_friendly_msg(v["status"], network)}
+                                "message": self_friendly_msg(v["status"], network),
+                                "settled_by": "webhook"}
                 i += 1
                 try:
                     resp = await client.post(
@@ -204,7 +205,8 @@ async def poll_verify_flutterwave(
                     if provider_id:
                         registry.deliver(provider_id,
                                          {"status": verdict[0], "raw": status, "data": data})
-                    return {"status": verdict[0], "message": verdict[1]}
+                    return {"status": verdict[0], "message": verdict[1],
+                            "settled_by": "polling"}
 
                 # Attente du prochain tick, interrompue tôt si le webhook livre.
                 if ev is not None:

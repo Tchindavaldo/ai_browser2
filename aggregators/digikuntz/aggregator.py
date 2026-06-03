@@ -205,6 +205,10 @@ class DigikuntzAggregator(Aggregator):
 
         result.success = result.final_status == "successful"
         result.payment_status = result.final_status
+        # Le verdict replay vient toujours du polling verify (cette boucle
+        # n'écoute pas le registre webhook).
+        if result.final_status in ("successful", "failed", "cancelled"):
+            result.settled_by = "polling"
         # Validation USSD par le client (verify -> successful) : on horodate
         # l'instant pour la garde anti-doublon après paiement réussi.
         if result.final_status == "successful":

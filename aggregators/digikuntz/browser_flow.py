@@ -261,6 +261,7 @@ class DigikuntzAgent:
             vp, req.network, provider_id=spec.get("provider_id"))
         result.final_status = poll["status"]
         result.final_message = poll["message"]
+        result.settled_by = poll.get("settled_by")
         result.payment_status = result.final_status
         # Validation USSD par le client (verify -> successful) : on horodate
         # l'instant pour la garde anti-doublon après paiement réussi.

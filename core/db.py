@@ -183,7 +183,8 @@ class Database:
         if not self.enabled or not provider_id:
             return
         _TERMINAL = {"successful", "failed", "cancelled"}
-        patch = {"status": status, "success": status == "successful"}
+        patch = {"status": status, "success": status == "successful",
+                 "settled_by": "webhook"}
         if message:
             patch["message"] = message
         # Mêmes timestamps que le settle polling (update_transaction), pour que la
@@ -224,6 +225,10 @@ class Database:
             "charge_response": result.flutterwave_charge_response[:5000],
             "error_signals": result.error_signals,
         }
+        # Trace QUI a settlé (polling/webhook). None pour un verdict hors course
+        # (ex. échec avant USSD) -> on ne touche pas la colonne dans ce cas.
+        if result.settled_by:
+            patch["settled_by"] = result.settled_by
         from datetime import datetime, timezone
         # Instant de l'envoi USSD : base du calcul anti-doublon (la fenêtre
         # opérateur court depuis là). cf. migration 006_ussd_sent_at.
