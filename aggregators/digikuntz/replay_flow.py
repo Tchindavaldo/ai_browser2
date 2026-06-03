@@ -280,7 +280,10 @@ async def step1_create_transaction(
                 "userPhone": phone,
                 "userCountry": "CM",
                 "senderName": name,
-                "callbackUrl": "https://app.digikuntz.com/callback",
+                # URL de webhook réelle (env DIGIKUNTZ_CALLBACK_URL) pour que
+                # DigiKUNTZ nous notifie le statut. NE PAS coder en dur : sinon
+                # le webhook part sur une URL bidon et n'arrive jamais.
+                "callbackUrl": _dk.callback_url,
             },
             headers={
                 "x-user-id": DIGIKUNTZ_USER_ID,
