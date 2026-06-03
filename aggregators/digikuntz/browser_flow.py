@@ -198,18 +198,12 @@ class DigikuntzAgent:
         if ussd_detected:
             vp = status_poll.extract_verify_params(sb.captured_requests)
             if vp:
-                # [DEBUG ussd-sent-timestamp] instant de l'envoi USSD = horodatage
-                # de la requête /charge capturée (c'est elle qui déclenche le push
-                # USSD). On le compare à l'heure courante pour vérifier le délai.
-                import time as _t, datetime as _dt
+                # Instant de l'envoi USSD = horodatage de la requête /charge
+                # capturée (c'est elle qui déclenche le push USSD). Base du calcul
+                # anti-doublon (la fenêtre opérateur court depuis là).
                 charge_req = sb.get_flutterwave_charge()
                 if charge_req and getattr(charge_req, "timestamp", 0):
-                    ts = charge_req.timestamp
-                    log.info("🕒 [ussd-sent] /charge capturé à %s (il y a %.1fs)",
-                             _dt.datetime.fromtimestamp(ts).isoformat(timespec="seconds"),
-                             _t.time() - ts)
-                else:
-                    log.info("🕒 [ussd-sent] /charge sans timestamp exploitable")
+                    result.ussd_sent_at = charge_req.timestamp
                 log.info("USSD demandé — navigateur fermé, polling verify différé "
                          "(flw_ref=%s)", vp["flw_ref"])
                 result.poll_after_close = {

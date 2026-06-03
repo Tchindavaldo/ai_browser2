@@ -214,10 +214,15 @@ class Database:
             "charge_response": result.flutterwave_charge_response[:5000],
             "error_signals": result.error_signals,
         }
-        # Horodate le passage à 'cancelled' : la garde anti-doublon /pay compte le
-        # délai restant à partir de cet instant (cf. migration 005_cancelled_at).
+        from datetime import datetime, timezone
+        # Instant de l'envoi USSD : base du calcul anti-doublon (la fenêtre
+        # opérateur court depuis là). cf. migration 006_ussd_sent_at.
+        if result.ussd_sent_at:
+            patch["ussd_sent_at"] = datetime.fromtimestamp(
+                result.ussd_sent_at, tz=timezone.utc).isoformat()
+        # Horodate le passage à 'cancelled' (audit du moment du verdict).
+        # cf. migration 005_cancelled_at.
         if final_status == "cancelled":
-            from datetime import datetime, timezone
             patch["cancelled_at"] = datetime.now(timezone.utc).isoformat()
 
         def _update():

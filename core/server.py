@@ -382,9 +382,15 @@ async def pay(
         #   - solde insuffisant / refus / échec → l'utilisateur réessaie direct,
         #   - panne API / opérateur down → rien n'a été tenté.
         if status == "cancelled":
-            # Le délai court depuis le PASSAGE à cancelled (cancelled_at), pas la
-            # création ; fallback created_at si la colonne est absente/vide.
-            elapsed = _seconds_since(last.get("cancelled_at") or last.get("created_at"))
+            # La fenêtre opérateur court depuis l'ENVOI de l'USSD (ussd_sent_at) :
+            # c'est là que l'opérateur reçoit la demande. Fallbacks en cascade si
+            # la colonne est absente/vide : cancelled_at (moment du verdict) puis
+            # created_at (création de la transaction).
+            elapsed = _seconds_since(
+                last.get("ussd_sent_at")
+                or last.get("cancelled_at")
+                or last.get("created_at")
+            )
             # Délai selon l'opérateur de la transaction stockée, pas un délai unique.
             window = settings.retry_window_for(last.get("network", ""))
             if elapsed is not None and elapsed < window:

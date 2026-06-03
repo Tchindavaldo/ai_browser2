@@ -76,7 +76,8 @@ ai_browser2/
 │       ├── 002_app_settings.sql         Réglages clé/valeur (ex. max_tabs_per_browser).
 │       ├── 003_transaction_errors.sql   Erreurs détaillées par moteur + source.
 │       ├── 004_provider_transaction_id.sql  Id provider (webhook/polling).
-│       └── 005_cancelled_at.sql        Horodate le passage à 'cancelled' (garde anti-doublon).
+│       ├── 005_cancelled_at.sql        Horodate le passage à 'cancelled' (audit).
+│       └── 006_ussd_sent_at.sql        Horodate l'envoi USSD (base du calcul anti-doublon).
 │
 ├── docs/openapi.json             Swagger versionné (régénérer via scripts/dump_openapi.py).
 ├── scripts/dump_openapi.py       Dump du schéma OpenAPI.
@@ -130,9 +131,12 @@ terminal de l'opérateur, qui devient `cancelled` en cas d'échec après USSD.)
 
 **Délai anti-doublon DÉPEND du réseau**, réglable par env
 (`settings.retry_window_for(network)`, env `RETRY_WINDOW_ORANGE_S`/`_MTN_S`).
-Sert UNIQUEMENT à la garde anti-doublon (temps d'attente après un `cancelled`
-avant de relancer) — il ne borne plus le polling. Seuls `pending` et `cancelled`
-bloquent un nouveau paiement.
+Sert UNIQUEMENT à la garde anti-doublon — il ne borne plus le polling. Le temps
+restant ("Réessayez dans X") se calcule depuis l'ENVOI de l'USSD :
+`X = retry_window(réseau) − (now − ussd_sent_at)` (la fenêtre opérateur court à
+partir du push USSD). Fallbacks si la colonne manque : `cancelled_at` (moment du
+verdict) puis `created_at`. Seuls `pending` et `cancelled` bloquent un nouveau
+paiement.
 
 ## Concurrence
 
