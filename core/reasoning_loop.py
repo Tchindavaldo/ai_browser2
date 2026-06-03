@@ -137,7 +137,7 @@ class ReasoningLoop:
 
         # `turn` = compteur de tours d'ACTION (borné par max_turns). Les tours
         # d'ATTENTE passive (await_change, ex. validation USSD) ne le consomment
-        # PAS : ils sont bornés par le temps (max_elapsed_s = 17min), pas par un
+        # PAS : ils sont bornés par le temps (max_elapsed_s, fenêtre opérateur), pas par un
         # nombre de tours — sinon l'attente épuiserait max_turns avant que
         # l'utilisateur valide. `n` = numéro de tour affiché (monotone).
         turn = 0
@@ -251,7 +251,7 @@ class ReasoningLoop:
             log.info("└────────────────────────────────────────")
             turn += 1
 
-            # Filet de sécurité 17 min : l'IA a vu "DÉLAI DÉPASSÉ" dans le header
+            # Filet de sécurité (fenêtre opérateur) : l'IA a vu "DÉLAI DÉPASSÉ" dans le header
             # de ce tour et a quand même choisi d'agir plutôt que de conclure. On
             # ne décide PAS du verdict ici — on arrête juste la boucle pour ne pas
             # laisser /pay pendre. L'outcome (decide_browser_outcome) tranchera.

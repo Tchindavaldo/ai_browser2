@@ -356,8 +356,8 @@ async def pay(
 
     # Garde anti-doublon par numéro (vaut pour curl ET navigateur).
     #  - dernière transaction encore 'pending' → bloque : à confirmer ou annuler.
-    #  - dernière transaction non-succès ET dans la fenêtre retry_window_s
-    #    (17 min, le délai opérateur) → bloque avec le temps restant à attendre.
+    #  - dernière transaction non-succès ET dans la fenêtre opérateur (selon le
+    #    réseau) → bloque avec le temps restant à attendre.
     last = await db.last_transaction_for_number(req.aggregator, req.phone)
     if last:
         status = (last.get("status") or "").lower()
@@ -375,16 +375,17 @@ async def pay(
                     "transaction_id": last.get("id"),
                 },
             )
-        # Fenêtre anti-doublon 17 min : on ne bloque QUE 'cancelled' — c'est le
-        # seul cas où un USSD a réellement été envoyé puis non validé dans le
-        # délai opérateur (la transaction peut encore se régler côté opérateur,
-        # donc on évite un doublon). Tout le reste est rechargeable tout de suite:
+        # Délai anti-doublon (selon le réseau) : on ne bloque QUE 'cancelled' — c'est le
+        # seul cas où un USSD a réellement été envoyé puis non validé (la transaction
+        # peut encore se régler côté opérateur, donc on évite un doublon). Tout le
+        # reste est rechargeable tout de suite:
         #   - solde insuffisant / refus / échec → l'utilisateur réessaie direct,
         #   - panne API / opérateur down → rien n'a été tenté.
         if status == "cancelled":
-            elapsed = _seconds_since(last.get("created_at"))
-            # Fenêtre selon l'opérateur de la transaction stockée (Orange 17min /
-            # MTN 10min), pas un délai unique.
+            # Le délai court depuis le PASSAGE à cancelled (cancelled_at), pas la
+            # création ; fallback created_at si la colonne est absente/vide.
+            elapsed = _seconds_since(last.get("cancelled_at") or last.get("created_at"))
+            # Délai selon l'opérateur de la transaction stockée, pas un délai unique.
             window = settings.retry_window_for(last.get("network", ""))
             if elapsed is not None and elapsed < window:
                 remaining = int(window - elapsed)

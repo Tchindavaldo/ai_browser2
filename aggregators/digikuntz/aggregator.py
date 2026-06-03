@@ -181,23 +181,11 @@ class DigikuntzAggregator(Aggregator):
 
         verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref, cfg=cfg)
 
+        # Le polling ne s'arrête que sur un verdict terminal (pas de timeout) :
+        # interpret_verify le traduit ici. Fallback unknown si réponse inattendue.
         verdict = self.interpret_status("verify", verify, req.network)
         if verdict:
             result.final_status, result.final_message = verdict
-        elif verify.get("status") == "timeout":
-            if verify.get("got_any_status"):
-                # 17 min écoulées sans validation = fait opérateur universel:
-                # la demande a expiré, le numéro doit être relançable tout de
-                # suite. Statut 'expired' (exclu de la garde anti-doublon).
-                # Aligné avec le moteur navigateur.
-                result.final_status = "expired"
-                result.final_message = (
-                    "Délai de validation dépassé (17 min). La demande de paiement "
-                    "a expiré côté opérateur. Vous pouvez relancer un paiement."
-                )
-            else:
-                result.final_status = "unknown"
-                result.final_message = "Flutterwave injoignable; statut à confirmer via l'API DigiKUNTZ."
         else:
             result.final_status = verify.get("data", {}).get("status", "unknown")
             result.final_message = f"Statut Flutterwave: {result.final_status}"

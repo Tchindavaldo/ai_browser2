@@ -3,7 +3,7 @@
 Une fois l'USSD demandé au client (le navigateur a fini son travail), le statut
 final ne vient PLUS du navigateur : on interroge directement l'API DigiKUNTZ
 (`GET {base}/transaction?transactionId=...`) jusqu'à un statut terminal ou
-l'expiration du délai opérateur (17 min). Mécanisme calqué sur le backend
+l'expiration du délai opérateur (fenêtre selon le réseau). Mécanisme calqué sur le backend
 MoobilPay (checkPaymentStatusHandler / paymentEventRegistry).
 
 Statuts DigiKUNTZ -> internes :
@@ -137,8 +137,7 @@ def extract_verify_params(captured) -> dict | None:
 
 
 async def poll_verify_flutterwave(
-    verify_params: dict, network: str, timeout_s: int | None = None,
-    provider_id: str | None = None,
+    verify_params: dict, network: str, provider_id: str | None = None,
 ) -> dict:
     """Polling verify/mpesa Flutterwave PROPRE AU NAVIGATEUR.
 
@@ -147,14 +146,16 @@ async def poll_verify_flutterwave(
     via le registre) NE TOUCHE PAS le replay, et inversement. Même comportement
     de fond (poll verify, interpret_verify), mais autonome.
 
+    PAS DE TIMEOUT : on poll jusqu'à un verdict terminal. L'opérateur tranche
+    toujours (Orange/MTN basculent une transaction non validée en échec après
+    leur propre délai), donc un terminal finit toujours par arriver — un échec
+    après USSD devient 'cancelled' (annulé par l'utilisateur ou l'opérateur).
+
     Si `provider_id` est fourni, on écoute AUSSI le registre : si le webhook
-    DigiKUNTZ livre un verdict terminal pendant qu'on poll, on s'arrête net
-    (option 2). Le premier des deux (poll verify OU webhook) qui a un terminal
-    gagne. 17min sans terminal -> expired.
+    DigiKUNTZ livre un verdict terminal pendant qu'on poll, on s'arrête net.
+    Le premier des deux (poll verify OU webhook) qui a un terminal gagne.
     """
     from . import replay_flow  # pour interpret_verify + ReplayConfig (lecture seule)
-    if timeout_s is None:
-        timeout_s = settings.retry_window_for(network)  # Orange 17min / MTN 10min
     cfg = replay_flow.ReplayConfig.defaults()
     if verify_params.get("pub_key"):
         cfg.pub_key = verify_params["pub_key"]
@@ -162,15 +163,14 @@ async def poll_verify_flutterwave(
     flw_ref = verify_params["flw_ref"]
 
     ev = registry.register(provider_id) if provider_id else None
-    log.info("poll_verify_flutterwave (nav): flw_ref=%s (max %ds, webhook=%s)",
-             flw_ref, timeout_s, bool(provider_id))
+    log.info("poll_verify_flutterwave (nav): flw_ref=%s (sans timeout, webhook=%s)",
+             flw_ref, bool(provider_id))
 
     start = time.monotonic()
-    deadline = start + timeout_s
     i = 0
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            while time.monotonic() < deadline:
+            while True:
                 # (a) le webhook a-t-il déjà livré le verdict ? -> on s'arrête net
                 if ev is not None and ev.is_set():
                     v = registry.take_verdict(provider_id)
@@ -214,11 +214,6 @@ async def poll_verify_flutterwave(
                         pass
                 else:
                     await asyncio.sleep(2)
-
-        # 17min écoulées sans terminal = délai opérateur dépassé.
-        return {"status": "expired",
-                "message": ("Délai de validation dépassé (17 min). La demande a "
-                            "expiré côté opérateur. Vous pouvez relancer un paiement.")}
     finally:
         if provider_id:
             registry.close(provider_id)
@@ -229,5 +224,5 @@ def self_friendly_msg(status: str, network: str) -> str:
     if status == "successful":
         return "Paiement validé avec succès."
     if status == "cancelled":
-        return "Paiement annulé / refusé sur le USSD."
+        return "Paiement annulé / non validé sur le USSD (par l'utilisateur ou l'opérateur)."
     return "Paiement échoué (refus ou solde insuffisant)."

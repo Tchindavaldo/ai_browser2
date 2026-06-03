@@ -43,7 +43,8 @@ FLW_STATUSES = {
     "successful": ("successful", "Paiement validé avec succès."),
     "success-completed": ("successful", "Paiement validé avec succès."),
     "failed": ("failed", None),
-    "cancelled": ("cancelled", "Paiement annulé par l'utilisateur."),
+    "cancelled": ("cancelled", "Paiement annulé / non validé sur le USSD "
+                  "(par l'utilisateur ou l'opérateur)."),
     "success-pending-validation": ("pending", "En attente de validation USSD."),
 }
 
@@ -101,10 +102,10 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
     """Interpret a /verify/mpesa response.
 
     L'USSD A ÉTÉ ENVOYÉ à ce stade. Or un solde insuffisant NE déclenche PAS
-    d'USSD (il échoue au /charge, avant). Donc tout ÉCHEC après USSD = l'utilisateur
-    a REFUSÉ / laissé expirer sur son téléphone -> 'cancelled' (et non 'failed').
-    'cancelled' bloque le numéro pendant la fenêtre (transaction déclenchée côté
-    opérateur). Vaut pour les DEUX moteurs (replay + navigateur partagent cette fn).
+    d'USSD (il échoue au /charge, avant). Donc tout ÉCHEC après USSD = non-validation
+    sur le téléphone (refus de l'utilisateur OU expiration côté opérateur) ->
+    'cancelled' (et non 'failed'). 'cancelled' bloque le numéro pendant le délai
+    anti-doublon. Vaut pour les DEUX moteurs (replay + navigateur partagent cette fn).
     """
     data = resp.get("data", {})
     if not isinstance(data, dict):
@@ -119,8 +120,8 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
         if st == "successful":
             return "successful", msg
         if st == "failed":
-            return "cancelled", ("Paiement refusé / non validé sur le USSD "
-                                 "par l'utilisateur.")
+            return "cancelled", ("Paiement annulé / non validé sur le USSD "
+                                 "(par l'utilisateur ou l'opérateur).")
         # pending (code 02) → the USSD was sent. The final verdict can still
         # arrive via data.status (e.g. status=failed while code stays 02), so
         # don't stop at the code — fall through to the status check below.
@@ -132,8 +133,8 @@ def interpret_verify(resp: dict, network: str) -> tuple[str, str] | None:
             return st, msg
         if st == "failed":
             # Échec APRÈS USSD = refus utilisateur -> cancelled (cf. docstring).
-            return "cancelled", ("Paiement refusé / non validé sur le USSD "
-                                 "par l'utilisateur.")
+            return "cancelled", ("Paiement annulé / non validé sur le USSD "
+                                 "(par l'utilisateur ou l'opérateur).")
         # pending → continue
         return None
 
@@ -463,29 +464,25 @@ async def step3_charge(
 
 
 async def step4_poll_verify(
-    modalauditid: str, flw_ref: str, timeout_s: int = 1020, cfg: "ReplayConfig | None" = None
+    modalauditid: str, flw_ref: str, cfg: "ReplayConfig | None" = None
 ) -> dict:
     """Poll the verify endpoint until payment is confirmed or failed.
 
-    Runs for at most ``timeout_s`` of REAL wall-clock time (default 1020s =
-    17 min — the observed delay before the operator auto-cancels an
-    unvalidated transaction, +1 min margin). The clock (`start`/`deadline`) is
-    local to this call, so concurrent replays each get their own 17-min budget.
+    PAS DE TIMEOUT : on poll jusqu'à un verdict terminal. L'opérateur tranche
+    toujours (Orange/MTN basculent une transaction non validée en échec après
+    leur propre délai), donc un terminal finit toujours par arriver.
     A single network hiccup on one poll (ReadTimeout, reset, non-JSON body) is
-    ignored: we skip that tick and keep polling until the budget is spent or a
-    final verdict arrives.
+    ignored: we skip that tick and keep polling until a final verdict arrives.
     """
     cfg = cfg or ReplayConfig.defaults()
-    print(f"[4] Polling verify (flw_ref={flw_ref})... (max {timeout_s}s)")
+    print(f"[4] Polling verify (flw_ref={flw_ref})... (sans timeout)")
 
     start = time.monotonic()
-    deadline = start + timeout_s
     i = 0
-    got_any_status = False  # did we ever receive a parsable verify response?
     last_status = None
 
     async with httpx.AsyncClient(timeout=30) as client:
-        while time.monotonic() < deadline:
+        while True:
             await asyncio.sleep(1)
             i += 1
             try:
@@ -500,12 +497,9 @@ async def step4_poll_verify(
                 )
                 data = resp.json()
             except (httpx.HTTPError, json.JSONDecodeError) as e:
-                remaining = int(deadline - time.monotonic())
-                print(f"    poll {i}: réseau instable ({type(e).__name__}), "
-                      f"on continue ({remaining}s restantes)...")
+                print(f"    poll {i}: réseau instable ({type(e).__name__}), on continue...")
                 continue
 
-            got_any_status = True
             status = data.get("data", {}).get("status", "pending")
             charge_code = data.get("data", {}).get("chargeResponseCode", "")
             elapsed = int(time.monotonic() - start)
@@ -525,15 +519,6 @@ async def step4_poll_verify(
                 return data
             if charge_code == "00":
                 return data
-
-    # 17 min écoulées sans verdict final.
-    # TODO (todo/poll-fallback-digikuntz.md): si aucun statut reçu OU que des
-    # erreurs réseau, interroger l'API DigiKUNTZ pour le vrai statut.
-    return {
-        "status": "timeout",
-        "message": "Verification timed out",
-        "got_any_status": got_any_status,
-    }
 
 
 async def main():
@@ -653,21 +638,6 @@ async def main():
     verdict = interpret_verify(verify, network)
     if verdict:
         status, msg = verdict
-    elif verify.get("status") == "timeout":
-        # 17 min écoulées sans verdict final. Deux cas distincts :
-        #  A) on a reçu des statuts (toujours pending) → le délai opérateur est
-        #     dépassé, donc la transaction est annulée par l'opérateur.
-        #  B) on n'a eu QUE des erreurs réseau (Flutterwave injoignable) → on ne
-        #     sait rien : fallback API DigiKUNTZ (voir todo/poll-fallback-digikuntz.md).
-        if verify.get("got_any_status"):
-            status = "cancelled"
-            msg = ("Transaction annulée par l'opérateur "
-                   "(non validée dans le délai).")
-        else:
-            status = "unknown"
-            msg = ("Flutterwave injoignable pendant 17 min (que des erreurs "
-                   "réseau). Statut à confirmer via l'API DigiKUNTZ "
-                   "[TODO: todo/poll-fallback-digikuntz.md].")
     else:
         status = verify.get("data", {}).get("status", "unknown")
         msg = f"Statut Flutterwave: {status}"

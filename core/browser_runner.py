@@ -151,7 +151,7 @@ async def _run_browser_flow_in_session(
     loop = ReasoningLoop(
         browser, llm, max_turns=max_turns,
         checkout_url_predicate=aggregator.checkout_url_predicate,
-        max_elapsed_s=settings.retry_window_for(req.network),  # Orange 17min / MTN 10min
+        max_elapsed_s=settings.browser_loop_max_s,  # garde-fou boucle IA (pas le délai anti-doublon)
     )
     loop_result = await loop.run(aggregator.browser_objective(req))
     result.turns = loop_result.turns

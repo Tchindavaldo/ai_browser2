@@ -52,18 +52,24 @@ class Settings:
     headless: bool = field(default_factory=lambda: _env("HEADLESS", "0") == "1")
     port: int = field(default_factory=lambda: int(_env("PORT", "7332")))
 
-    # Fenêtre de retry / délai opérateur (secondes) — DÉPEND DE L'OPÉRATEUR :
-    # le délai avant qu'un opérateur Mobile Money auto-annule une transaction non
-    # validée diffère. Observé : Orange ~17 min, MTN ~10 min (+1 min de marge).
-    # Sert (a) au polling verify (budget d'attente), (b) au plafond boucle
-    # navigateur, (c) à la garde anti-doublon par numéro côté /pay.
-    retry_window_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_S", "1020")))
-    retry_window_orange_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_ORANGE_S", "1020")))
-    retry_window_mtn_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_MTN_S", "600")))
+    # Délai anti-doublon (secondes) — DÉPEND DE L'OPÉRATEUR. C'est le temps
+    # pendant lequel, APRÈS qu'une transaction est passée 'cancelled', le numéro
+    # ne peut pas relancer un nouveau paiement (la transaction peut encore se
+    # régler côté opérateur). Réglable par env. NE borne PLUS le polling : celui-ci
+    # poll jusqu'à un verdict terminal de l'opérateur (pas de timeout).
+    retry_window_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_S", "960")))
+    retry_window_orange_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_ORANGE_S", "960")))
+    retry_window_mtn_s: int = field(default_factory=lambda: int(_env("RETRY_WINDOW_MTN_S", "60")))
+
+    # Plafond de sécurité de la boucle de raisonnement navigateur (secondes).
+    # INDÉPENDANT du délai anti-doublon : c'est juste un garde-fou pour que l'IA
+    # ne tourne pas sans fin avant d'envoyer l'USSD (en pratique elle conclut en
+    # ~7 tours). Au-delà, la boucle s'arrête pour ne pas laisser /pay pendre.
+    browser_loop_max_s: int = field(default_factory=lambda: int(_env("BROWSER_LOOP_MAX_S", "300")))
 
     def retry_window_for(self, network: str) -> int:
-        """Délai opérateur (s) selon le réseau. Orange 17min, MTN 10min ;
-        fallback retry_window_s pour un réseau inconnu."""
+        """Délai anti-doublon (s) selon le réseau ; fallback retry_window_s pour un
+        réseau inconnu. Valeurs réglables via les env RETRY_WINDOW_*."""
         n = (network or "").lower()
         if "orange" in n:
             return self.retry_window_orange_s

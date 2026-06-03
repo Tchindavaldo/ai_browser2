@@ -15,7 +15,7 @@ IA** (Playwright + LLM DeepSeek qui pilote le checkout Flutterwave) et un **curl
 
 **L'IA décide, le code informe.** Le backend fournit à l'IA un snapshot fidèle + des
 outils + un objectif ; il ne décide JAMAIS à sa place qu'un paiement a réussi/échoué.
-Seule exception : les faits opérateur universels et mécaniques (timeout 17 min → `expired`).
+Seule exception : les faits opérateur universels et mécaniques (un échec verify après USSD → `cancelled`).
 
 ---
 
@@ -35,7 +35,7 @@ ai_browser2/
 │   │                             PaymentResult (porte error_code, curl_template, errors…) / CurlTemplate.
 │   ├── registry.py               Registre nom -> instance d'agrégateur (register / get / names).
 │   ├── config.py                 settings centralisés depuis .env (DigiKUNTZ, FLW, LLM, Supabase,
-│   │                             retry_window_s=1020s, max_tabs_per_browser).
+│   │                             retry_window_* par réseau, max_tabs_per_browser).
 │   ├── db.py                     Couche Supabase async (no-op si non configuré) : transactions,
 │   │                             curl_templates, transaction_traces, transaction_errors, app_settings.
 │   ├── browser.py                BrowserSession (1 transaction = 1 contexte isolé : page, capture
@@ -47,7 +47,7 @@ ai_browser2/
 │   │                             l'agrégateur, capture charge/verify, construit le curl_template.
 │   ├── reasoning_loop.py         Boucle IA : snapshot -> prompt -> LLM -> actions. Gère await_change
 │   │                             (attente passive bornée par le TEMPS, pas par max_turns), plafond
-│   │                             17min (deadline_exceeded injecté dans le header).
+│   │                             garde-fou BROWSER_LOOP_MAX_S (deadline_exceeded dans le header).
 │   ├── llm_client.py             Client DeepSeek (LlmClient.send).
 │   ├── classifier.py             Classification statut par mots-clés (apprend de nouveaux mots).
 │   ├── error_tracking.py         build_errors() : dérive les lignes transaction_errors (engine + source).
@@ -65,7 +65,7 @@ ai_browser2/
 │       │                         verify HORS navigateur), _interpret/_friendly.
 │       ├── status_poll.py        Polling statut DigiKUNTZ (GET {base}/transaction?transactionId=) :
 │       │                         source de vérité du verdict après USSD. payin_* -> interne, poll
-│       │                         jusqu'à terminal ou 17min (pending 17min -> expired). 0 token.
+│       │                         jusqu'à un verdict terminal (sans timeout : l'opérateur tranche toujours). 0 token.
 │       └── replay_flow.py        Mode curl replay : step1..step4 (create/init/charge/poll verify),
 │                                 ReplayConfig (config par appel, pas de globals mutés), interpret_*.
 │
@@ -74,7 +74,9 @@ ai_browser2/
 │   └── migrations/               Évolutions idempotentes, une par fichier :
 │       ├── 001_transaction_traces.sql   Trace tour-par-tour de l'IA.
 │       ├── 002_app_settings.sql         Réglages clé/valeur (ex. max_tabs_per_browser).
-│       └── 003_transaction_errors.sql   Erreurs détaillées par moteur + source.
+│       ├── 003_transaction_errors.sql   Erreurs détaillées par moteur + source.
+│       ├── 004_provider_transaction_id.sql  Id provider (webhook/polling).
+│       └── 005_cancelled_at.sql        Horodate le passage à 'cancelled' (garde anti-doublon).
 │
 ├── docs/openapi.json             Swagger versionné (régénérer via scripts/dump_openapi.py).
 ├── scripts/dump_openapi.py       Dump du schéma OpenAPI.
@@ -90,8 +92,8 @@ ai_browser2/
 
 1. **server.py** valide (agrégateur, réseau), applique la **garde anti-doublon** par numéro :
    - dernière transaction `pending` → 409 (confirmer/annuler) ;
-   - dernière `cancelled` < 17min → 409 retry_too_soon ;
-   - `failed`/`expired`/panne → relançable tout de suite.
+   - dernière `cancelled` dans le délai anti-doublon → 409 retry_too_soon ;
+   - `failed`/panne → relançable tout de suite.
 2. Insère la transaction `pending`, dispatch selon `mode` (auto/browser/replay) vers
    l'agrégateur (`pay_via_browser` ou `replay`).
 3. **browser** : `run_browser_flow` acquiert une **session isolée**, crée la transaction
@@ -101,12 +103,12 @@ ai_browser2/
    les params verify (flw_ref/modalauditid) et les pose sur `result.poll_after_close` SANS
    poller : **la tab est fermée immédiatement** (`release_session`). Ce n'est qu'APRÈS, hors
    session, que `run_browser_flow` appelle `finalize_after_close` -> **polling verify
-   Flutterwave** (`status_poll.py`) en HTTP pur, jusqu'au verdict terminal ou délai opérateur
-   (pending -> `expired`). Aucun navigateur n'est tenu pendant l'attente ; le polling ne
+   Flutterwave** (`status_poll.py`) en HTTP pur, jusqu'au verdict terminal (sans timeout :
+   échec après USSD -> `cancelled`). Aucun navigateur n'est tenu pendant l'attente ; le polling ne
    coûte aucun token.
    *(Webhook serveur possible quand le backend a une URL publique — cf.
    `todo/webhook-digikuntz.md`.)*
-4. **replay** : `step1..step4` rejouent charge + poll verify (17min), `ReplayConfig` par appel.
+4. **replay** : `step1..step4` rejouent charge + poll verify (sans timeout), `ReplayConfig` par appel.
 5. **finally** : settle la transaction en BD (+ trace + errors), construit la réponse.
    - panne amont (API/opérateur) → **503** `{code, message}` (vue uniforme client) ;
    - sinon **vue client** minimale (success/status/message/transaction_id/code) ; `?debug=true`
@@ -116,17 +118,21 @@ ai_browser2/
 
 - `successful` — payé.
 - `failed` — échec AVANT l'USSD (solde insuffisant au /charge, etc.). Relançable.
-- `cancelled` — échec APRÈS l'USSD = refus/non-validation par l'utilisateur (un
-  solde insuffisant ne déclenche jamais d'USSD). **Bloque** le numéro pendant la
-  fenêtre opérateur.
-- `expired` — fenêtre opérateur écoulée sans verdict. Relançable tout de suite.
+- `cancelled` — échec APRÈS l'USSD = refus/non-validation, par l'utilisateur OU
+  l'opérateur (un solde insuffisant ne déclenche jamais d'USSD). Le polling tourne
+  sans timeout jusqu'à ce verdict (l'opérateur tranche toujours). **Bloque** le
+  numéro pendant le délai anti-doublon.
 - `pending` — en cours.
 - `network_unavailable` / `operator_unavailable` — pannes amont → **503**.
 
-**Délai opérateur (fenêtre) DÉPEND du réseau** : Orange ~17min, MTN ~10min
+(Plus de statut `expired` : le polling n'a plus de timeout, il attend le verdict
+terminal de l'opérateur, qui devient `cancelled` en cas d'échec après USSD.)
+
+**Délai anti-doublon DÉPEND du réseau**, réglable par env
 (`settings.retry_window_for(network)`, env `RETRY_WINDOW_ORANGE_S`/`_MTN_S`).
-Sert au polling verify, au plafond de la boucle navigateur, et à la garde
-anti-doublon. Seuls `pending` et `cancelled` bloquent un nouveau paiement.
+Sert UNIQUEMENT à la garde anti-doublon (temps d'attente après un `cancelled`
+avant de relancer) — il ne borne plus le polling. Seuls `pending` et `cancelled`
+bloquent un nouveau paiement.
 
 ## Concurrence
 

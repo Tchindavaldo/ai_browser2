@@ -163,26 +163,26 @@ class DigikuntzAgent:
         # await_change, et conclut elle-même succès/échec). Le code n'a donc plus
         # de watch qui juge. Ici on se contente de RECUEILLIR la conclusion.
 
-        # Cas 1 — la boucle a expiré (plafond 17min atteint sans que l'IA conclue).
-        # FAIT opérateur universel et mécanique (délai dépassé) -> 'expired', le
-        # numéro reste relançable tout de suite. Seule décision laissée au code,
-        # car ce n'est pas une interprétation (cf. CLAUDE.md, exception).
+        # Cas 1 — le plafond de la boucle IA a été atteint SANS que l'USSD soit
+        # envoyé (page cassée, checkout qui ne répond pas…). Aucun paiement n'a
+        # abouti côté opérateur -> 'failed' (relançable tout de suite). Ce n'est
+        # PAS un verdict de paiement, juste le constat mécanique que la boucle a
+        # dû s'arrêter avant d'aboutir.
         if loop_result.error == "deadline exceeded":
-            result.final_status = "expired"
+            result.final_status = "failed"
             result.final_message = (
-                "Délai de validation dépassé (17 min). La demande de paiement "
-                "a expiré côté opérateur. Vous pouvez relancer un paiement."
+                "Le checkout n'a pas abouti à temps (aucune demande USSD envoyée). "
+                "Vous pouvez relancer un paiement."
             )
-            log.info("Boucle expirée (17min) -> expired")
+            log.info("Plafond boucle IA atteint sans USSD -> failed")
             result.payment_status = result.final_status
             return
 
         # Cas 2 — USSD demandé au client : le navigateur a FINI son travail.
         # Le statut final ne vient PAS de l'écran (coûteux, peu fiable) mais du
-        # POLLING STATUT DigiKUNTZ (source de vérité), jusqu'à terminal ou 17min.
-        # Un pending qui dure 17min = expiré (annulé opérateur). Le webhook, s'il
-        # est joignable, met à jour en parallèle (cf. /webhook) — le polling reste
-        # le mécanisme fiable en local.
+        # POLLING verify Flutterwave (source de vérité), jusqu'à un verdict
+        # terminal (sans timeout : l'opérateur finit toujours par trancher). Le
+        # webhook, s'il est joignable, met à jour en parallèle (cf. /webhook).
         ussd_detected = (
             agent_status in ("ussd_sent", "pending")
             or "150*50" in agent_message

@@ -27,6 +27,17 @@ Règle: **tout travail de debug commence sur une branche `debug/`**, créée dep
 la branche de feature concernée (pas depuis `main`), pour hériter de son
 instrumentation. Ne jamais débuguer directement sur `main` ni sur une `feature/`.
 
+**Procédure systématique (OBLIGATOIRE) dès qu'on me demande de résoudre un bug
+ou un problème :**
+1. Créer une branche dédiée (`debug/<sujet>`) **depuis la branche d'où vient le
+   problème** (la feature/branche concernée), jamais depuis `main`.
+2. Y travailler **séparément** (la résolution reste isolée sur cette branche).
+3. **Tester / faire valider** la correction (par l'utilisateur, tests live inclus)
+   AVANT tout merge.
+4. **Merger seulement après validation** dans la branche d'origine.
+Ne jamais coder un correctif directement sur la branche d'origine ni merger sans
+validation explicite.
+
 ## Philosophie agent IA (OBLIGATOIRE)
 
 **L'IA a le contrôle total — rien n'est décidé en dur dans le code.**

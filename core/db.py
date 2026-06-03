@@ -40,6 +40,22 @@ class Database:
     def enabled(self) -> bool:
         return self._client is not None
 
+    async def _run(self, fn, timeout: float = 15.0):
+        """Exécute un appel Supabase BLOQUANT dans un thread, BORNÉ par timeout.
+
+        Le client Supabase est synchrone et n'a pas de timeout réseau : un hoquet
+        peut pendre indéfiniment et bloquer la requête /pay APRÈS le verdict.
+        On l'enveloppe donc dans asyncio.wait_for : au-delà du délai, on logge et
+        on rend la main (la persistance est best-effort, jamais bloquante)."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.warning("DB call timed out after %ss — skipping (best-effort)", timeout)
+            return None
+        except Exception as e:  # noqa: BLE001
+            log.warning("DB call failed: %s", e)
+            return None
+
     # --- transactions audit ---
     async def has_pending(self, aggregator: str, phone: str) -> bool:
         """True if a transaction for (aggregator, phone) is still 'pending'.
@@ -166,7 +182,7 @@ class Database:
         webhook). Idempotent : n'écrase PAS un verdict terminal déjà posé."""
         if not self.enabled or not provider_id:
             return
-        _TERMINAL = {"successful", "failed", "cancelled", "expired"}
+        _TERMINAL = {"successful", "failed", "cancelled"}
         patch = {"status": status, "success": status == "successful"}
         if message:
             patch["message"] = message
@@ -188,24 +204,26 @@ class Database:
         """Update a pending row with the final verdict once the payment settles."""
         if not self.enabled or tx_id is None:
             return
+        final_status = result.final_status or result.payment_status or "unknown"
         patch = {
             "transaction_ref": result.transaction_id,
             "provider_transaction_id": result.provider_transaction_id or None,
-            "status": result.final_status or result.payment_status or "unknown",
+            "status": final_status,
             "message": result.final_message,
             "success": result.success,
             "charge_response": result.flutterwave_charge_response[:5000],
             "error_signals": result.error_signals,
         }
+        # Horodate le passage à 'cancelled' : la garde anti-doublon /pay compte le
+        # délai restant à partir de cet instant (cf. migration 005_cancelled_at).
+        if final_status == "cancelled":
+            from datetime import datetime, timezone
+            patch["cancelled_at"] = datetime.now(timezone.utc).isoformat()
 
         def _update():
             self._client.table("transactions").update(patch).eq("id", tx_id).execute()
 
-        try:
-            await asyncio.to_thread(_update)
-        except Exception as e:  # noqa: BLE001
-            log.warning("update_transaction failed: %s", e)
-
+        await self._run(_update)
         # Persist the per-turn AI trace into its dedicated table (browser mode).
         await self.save_trace(tx_id, result.trace)
         # Persist detailed errors (table transaction_errors).
@@ -235,10 +253,7 @@ class Database:
         def _insert():
             self._client.table("transaction_errors").insert(rows).execute()
 
-        try:
-            await asyncio.to_thread(_insert)
-        except Exception as e:  # noqa: BLE001
-            log.warning("save_errors failed: %s", e)
+        await self._run(_insert)
 
     async def get_errors(self, transaction_id: int) -> list[dict]:
         """Return the detailed error rows for a transaction (newest first)."""
@@ -282,10 +297,7 @@ class Database:
         def _insert():
             self._client.table("transaction_traces").insert(rows).execute()
 
-        try:
-            await asyncio.to_thread(_insert)
-        except Exception as e:  # noqa: BLE001
-            log.warning("save_trace failed: %s", e)
+        await self._run(_insert)
 
     async def get_traces(self, transaction_id: int) -> list[dict]:
         """Return the per-turn trace rows for a transaction, ordered by turn."""
@@ -464,11 +476,7 @@ class Database:
             )
             return res.data[0] if res.data else None
 
-        try:
-            return await asyncio.to_thread(_save_if_changed)
-        except Exception as e:  # noqa: BLE001
-            log.warning("save_template failed: %s", e)
-            return None
+        return await self._run(_save_if_changed)
 
     async def load_template(self, aggregator: str) -> CurlTemplate | None:
         """Load the active template for this aggregator (the one replay uses)."""
