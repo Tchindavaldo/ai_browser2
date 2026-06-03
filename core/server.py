@@ -375,12 +375,14 @@ async def pay(
                     "transaction_id": last.get("id"),
                 },
             )
-        # Délai anti-doublon (selon le réseau) : on ne bloque QUE 'cancelled' — c'est le
-        # seul cas où un USSD a réellement été envoyé puis non validé (la transaction
-        # peut encore se régler côté opérateur, donc on évite un doublon). Tout le
-        # reste est rechargeable tout de suite:
-        #   - solde insuffisant / refus / échec → l'utilisateur réessaie direct,
-        #   - panne API / opérateur down → rien n'a été tenté.
+        # Délai anti-doublon (selon le réseau) : on bloque 'cancelled' ET
+        # 'successful' pendant la fenêtre réseau —
+        #   - cancelled : un USSD a été envoyé puis non validé (la transaction peut
+        #     encore se régler côté opérateur, on évite un doublon) ;
+        #   - successful : un paiement vient d'aboutir, on évite un re-paiement par
+        #     erreur juste après.
+        # Le reste est rechargeable tout de suite : solde insuffisant / refus /
+        # échec → l'utilisateur réessaie direct ; panne API/opérateur → rien tenté.
         if status == "cancelled":
             # La fenêtre opérateur court depuis l'ENVOI de l'USSD (ussd_sent_at) :
             # c'est là que l'opérateur reçoit la demande. Fallbacks en cascade si
@@ -402,6 +404,30 @@ async def pay(
                         "message": (
                             f"Une transaction récente est en cours de validation sur le "
                             f"numéro {req.phone}. Réessayez dans {_fmt_duration(remaining)}."
+                        ),
+                        "aggregator": req.aggregator,
+                        "phone": req.phone,
+                        "last_status": status,
+                        "retry_after_s": remaining,
+                    },
+                )
+
+        # Paiement RÉUSSI récent : on bloque un NOUVEAU paiement pendant la fenêtre
+        # réseau, comptée depuis la VALIDATION USSD (validated_at). Évite qu'un
+        # client repaie par erreur juste après un paiement abouti. Fallback
+        # created_at si la colonne manque.
+        if status == "successful":
+            elapsed = _seconds_since(last.get("validated_at") or last.get("created_at"))
+            window = settings.retry_window_for(last.get("network", ""))
+            if elapsed is not None and elapsed < window:
+                remaining = int(window - elapsed)
+                raise HTTPException(
+                    409,
+                    {
+                        "error": "retry_too_soon",
+                        "message": (
+                            f"Vous avez récemment effectué un paiement sur le numéro "
+                            f"{req.phone}. Veuillez réessayer dans {_fmt_duration(remaining)}."
                         ),
                         "aggregator": req.aggregator,
                         "phone": req.phone,

@@ -77,7 +77,8 @@ ai_browser2/
 │       ├── 003_transaction_errors.sql   Erreurs détaillées par moteur + source.
 │       ├── 004_provider_transaction_id.sql  Id provider (webhook/polling).
 │       ├── 005_cancelled_at.sql        Horodate le passage à 'cancelled' (audit).
-│       └── 006_ussd_sent_at.sql        Horodate l'envoi USSD (base du calcul anti-doublon).
+│       ├── 006_ussd_sent_at.sql        Horodate l'envoi USSD (anti-doublon cancelled).
+│       └── 007_validated_at.sql        Horodate la validation USSD (anti-doublon après succès).
 │
 ├── docs/openapi.json             Swagger versionné (régénérer via scripts/dump_openapi.py).
 ├── scripts/dump_openapi.py       Dump du schéma OpenAPI.
@@ -93,7 +94,8 @@ ai_browser2/
 
 1. **server.py** valide (agrégateur, réseau), applique la **garde anti-doublon** par numéro :
    - dernière transaction `pending` → 409 (confirmer/annuler) ;
-   - dernière `cancelled` dans le délai anti-doublon → 409 retry_too_soon ;
+   - dernière `cancelled` (depuis `ussd_sent_at`) ou `successful` (depuis
+     `validated_at`) dans le délai anti-doublon → 409 retry_too_soon ;
    - `failed`/panne → relançable tout de suite.
 2. Insère la transaction `pending`, dispatch selon `mode` (auto/browser/replay) vers
    l'agrégateur (`pay_via_browser` ou `replay`).
@@ -131,12 +133,14 @@ terminal de l'opérateur, qui devient `cancelled` en cas d'échec après USSD.)
 
 **Délai anti-doublon DÉPEND du réseau**, réglable par env
 (`settings.retry_window_for(network)`, env `RETRY_WINDOW_ORANGE_S`/`_MTN_S`).
-Sert UNIQUEMENT à la garde anti-doublon — il ne borne plus le polling. Le temps
-restant ("Réessayez dans X") se calcule depuis l'ENVOI de l'USSD :
-`X = retry_window(réseau) − (now − ussd_sent_at)` (la fenêtre opérateur court à
-partir du push USSD). Fallbacks si la colonne manque : `cancelled_at` (moment du
-verdict) puis `created_at`. Seuls `pending` et `cancelled` bloquent un nouveau
-paiement.
+Sert UNIQUEMENT à la garde anti-doublon — il ne borne plus le polling.
+`pending`, `cancelled` ET `successful` bloquent un nouveau paiement pendant cette
+fenêtre ; le temps restant ("Réessayez dans X") = `retry_window(réseau) − écoulé`,
+l'écoulé étant compté depuis :
+- `cancelled` → l'ENVOI de l'USSD (`ussd_sent_at`, fallbacks `cancelled_at` puis
+  `created_at`) ;
+- `successful` → la VALIDATION de l'USSD (`validated_at`, fallback `created_at`),
+  message « Vous avez récemment effectué un paiement… ».
 
 ## Concurrence
 

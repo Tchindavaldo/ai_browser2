@@ -205,6 +205,10 @@ class DigikuntzAggregator(Aggregator):
 
         result.success = result.final_status == "successful"
         result.payment_status = result.final_status
+        # Validation USSD par le client (verify -> successful) : on horodate
+        # l'instant pour la garde anti-doublon après paiement réussi.
+        if result.final_status == "successful":
+            result.validated_at = _t.time()
         return result
 
 

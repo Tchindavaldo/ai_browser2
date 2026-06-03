@@ -224,6 +224,11 @@ class Database:
         # cf. migration 005_cancelled_at.
         if final_status == "cancelled":
             patch["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+        # Instant de la validation USSD (paiement réussi) : base de la garde
+        # anti-doublon après succès. cf. migration 007_validated_at.
+        if result.validated_at:
+            patch["validated_at"] = datetime.fromtimestamp(
+                result.validated_at, tz=timezone.utc).isoformat()
 
         def _update():
             self._client.table("transactions").update(patch).eq("id", tx_id).execute()

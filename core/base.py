@@ -59,6 +59,9 @@ class PaymentResult:
     # flw_ref). La fenêtre opérateur court depuis là -> base du calcul anti-doublon.
     # None tant qu'aucun USSD n'a été envoyé (échec avant USSD, etc.).
     ussd_sent_at: float | None = None
+    # Instant (epoch) où le client a VALIDÉ l'USSD (verify -> successful). Base du
+    # blocage anti-doublon après un paiement réussi. None si pas (encore) validé.
+    validated_at: float | None = None
     # Polling à exécuter APRÈS la fermeture du navigateur (sans tab). Posé par
     # decide_browser_outcome quand l'USSD est demandé : le navigateur a fini, on
     # ferme sa tab, puis le runner appelle finalize_after_close() qui poll/webhook

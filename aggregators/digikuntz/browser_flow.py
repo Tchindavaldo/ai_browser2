@@ -262,6 +262,11 @@ class DigikuntzAgent:
         result.final_status = poll["status"]
         result.final_message = poll["message"]
         result.payment_status = result.final_status
+        # Validation USSD par le client (verify -> successful) : on horodate
+        # l'instant pour la garde anti-doublon après paiement réussi.
+        if result.final_status == "successful":
+            import time as _t
+            result.validated_at = _t.time()
         log.info("Verdict polling verify (post-close): %s", result.final_status)
 
     def _friendly(self, status: str, network: str, raw: str,
