@@ -179,7 +179,17 @@ class DigikuntzAggregator(Aggregator):
             result.error = "No flw_ref in charge response"
             return result
 
+        # [DEBUG ussd-sent-timestamp] /charge a renvoyé un flw_ref => l'USSD vient
+        # d'être envoyé au client. C'est l'instant de référence (replay) qu'on
+        # veut valider avant d'en faire la base du calcul anti-doublon.
+        import time as _t, datetime as _dt
+        _ussd_at = _t.time()
+        log.info("🕒 [ussd-sent] replay: USSD envoyé à %s (flw_ref=%s)",
+                 _dt.datetime.fromtimestamp(_ussd_at).isoformat(timespec="seconds"), flw_ref)
+
         verify = await replay_flow.step4_poll_verify(charge["modalauditid"], flw_ref, cfg=cfg)
+        log.info("🕒 [ussd-sent] replay: verdict %ds après l'envoi USSD",
+                 int(_t.time() - _ussd_at))
 
         # Le polling ne s'arrête que sur un verdict terminal (pas de timeout) :
         # interpret_verify le traduit ici. Fallback unknown si réponse inattendue.
