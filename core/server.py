@@ -512,6 +512,13 @@ async def pay(
         if result.error_code in UPSTREAM_CODES:
             result.final_status = result.error_code
             result.final_message = UPSTREAM_MESSAGES[result.error_code]
+        # Filet: tout 'successful' = USSD validé par le client. Les moteurs posent
+        # validated_at sur le chemin verify ; ici on garantit qu'il est posé pour
+        # TOUS les chemins de succès (URL guard, verdict charge, conclusion IA…),
+        # quel que soit le mode (browser/replay). La garde anti-doublon en dépend.
+        if result.final_status == "successful" and not result.validated_at:
+            import time as _t
+            result.validated_at = _t.time()
         # Dérive les erreurs détaillées (table transaction_errors) depuis le
         # verdict, en distinguant le moteur et la source (ai/browser/transaction).
         result.errors = build_errors(result, engine_used)
