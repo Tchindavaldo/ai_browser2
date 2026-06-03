@@ -1,5 +1,24 @@
 # TODO — Migrer la vue admin/debug vers un endpoint dédié (option 2)
 
+> ⚠️ **PRIORITÉ HAUTE — l'app est désormais DÉPLOYÉE et PUBLIQUE sur Fly**
+> (`https://mobilwallet-backend.fly.dev`). Les endpoints admin sont seulement
+> *masqués* dans Swagger (`include_in_schema=False`), **pas protégés** : quiconque
+> connaît l'URL accède à l'historique des transactions, aux traces IA, aux
+> templates curl et aux payloads (via les routes admin ou `?debug=true`).
+>
+> **Décision retenue (option 1) :** protéger par une **clé admin statique**
+> (`ADMIN_API_KEY` en secret Fly) + header `X-Admin-Key`, vérifiée par une
+> dépendance FastAPI `require_admin`. C'est le mécanisme le plus simple et
+> suffisant ici. À implémenter sur une branche dédiée.
+>
+> Étapes minimales (clé admin) :
+> 1. Lire `ADMIN_API_KEY` dans `core/config.py` (secret Fly, jamais en dur).
+> 2. Dépendance `require_admin` (compare le header `X-Admin-Key`, 401/403 sinon).
+> 3. L'appliquer à TOUTES les routes admin (`/transactions*`, `/templates*`,
+>    `/drive`) ET au paramètre `?debug=true` de `/pay`.
+> 4. Documenter le security scheme `apiKey` (header) dans Swagger pour le tag
+>    `admin`, puis régénérer (skill update-swagger).
+
 ## Contexte
 
 Les endpoints exposent par défaut une **vue client minimale** (success, status,
