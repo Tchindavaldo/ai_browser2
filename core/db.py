@@ -186,6 +186,16 @@ class Database:
         patch = {"status": status, "success": status == "successful"}
         if message:
             patch["message"] = message
+        # Mêmes timestamps que le settle polling (update_transaction), pour que la
+        # garde anti-doublon ait le bon point de départ quand le WEBHOOK gagne la
+        # course. cancelled_at = moment du verdict ; validated_at = validation USSD.
+        # (ussd_sent_at n'est pas connu du webhook — il vient du /charge côté moteur.)
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if status == "cancelled":
+            patch["cancelled_at"] = now_iso
+        elif status == "successful":
+            patch["validated_at"] = now_iso
 
         def _update():
             q = (self._client.table("transactions")
