@@ -1,15 +1,23 @@
-FROM python:3.12.13 AS builder
+# Image officielle Playwright : Chromium + dépendances système + sandbox + Node
+# (requis par core/crypto/encrypt.js) déjà inclus. Version alignée sur le
+# playwright pip (1.60.0) pour éviter tout mismatch binaire/lib.
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=7332 \
+    HOST=0.0.0.0 \
+    HEADLESS=1
+
 WORKDIR /app
 
-
-RUN python -m venv .venv
 COPY requirements.txt ./
-RUN .venv/bin/pip install -r requirements.txt
-FROM python:3.12.13-slim
-WORKDIR /app
-COPY --from=builder /app/.venv .venv/
+RUN pip install --no-cache-dir -r requirements.txt
+# Chromium est déjà dans l'image ; on garantit le lien avec la version pip.
+RUN playwright install chromium
+
 COPY . .
-CMD ["/app/.venv/bin/fastapi", "run"]
+
+# L'app démarre via son launcher custom (pool navigateur + lifespan + PORT/HOST),
+# PAS via `fastapi run`.
+CMD ["python", "main.py"]

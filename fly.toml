@@ -1,7 +1,5 @@
-# fly.toml app configuration file generated for mobilwallet-backend on 2026-06-03T12:43:31Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# fly.toml — mobilwallet-backend
+# Doc : https://fly.io/docs/reference/configuration/
 
 app = 'mobilwallet-backend'
 primary_region = 'ams'
@@ -9,15 +7,16 @@ primary_region = 'ams'
 [build]
 
 [http_service]
-  internal_port = 8080
+  internal_port = 7332          # l'app uvicorn écoute sur 7332 (cf. PORT)
   force_https = true
-  auto_stop_machines = 'stop'
+  # La machine doit rester UP : le webhook DigiKUNTZ doit être joignable et un
+  # polling /pay (sans timeout) ne doit pas être tué par un auto-stop.
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
 [[vm]]
-  memory = '1gb'
+  memory = '1gb'                # Chromium (Playwright) a besoin de RAM
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256
