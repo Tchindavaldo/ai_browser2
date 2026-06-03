@@ -166,15 +166,21 @@ class DigikuntzAggregator(Aggregator):
             result.payment_status = result.final_status
             return result
 
-        # Extract flw_ref then poll verify (17-min clock budget lives in step4).
+        # Extract flw_ref then poll verify. Le flw_ref peut être à plusieurs
+        # profondeurs selon la forme de la réponse /charge :
+        #   - charge direct  : data.flw_ref  OU  data.data.flw_reference
+        #   - "demande longue" (résolu via ping_url) : data.flw_reference
+        # On cherche flw_ref ET flw_reference, au niveau data ET data.data.
         charge_data = charge_resp.get("data", {})
         flw_ref = ""
         if isinstance(charge_data, dict):
-            flw_ref = charge_data.get("flw_ref", "")
+            flw_ref = (charge_data.get("flw_ref")
+                       or charge_data.get("flw_reference") or "")
             if not flw_ref:
                 nested = charge_data.get("data", {})
                 if isinstance(nested, dict):
-                    flw_ref = nested.get("flw_reference", "")
+                    flw_ref = (nested.get("flw_reference")
+                               or nested.get("flw_ref") or "")
         if not flw_ref:
             result.error = "No flw_ref in charge response"
             return result
